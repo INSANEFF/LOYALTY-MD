@@ -1,6 +1,7 @@
 /*
 📝 | LOYALTY MD Bot
 🖥️ | Powered by LOYALTY MD
+  Multi-Session WhatsApp Bot
 */
 
 const fs = require('fs');
@@ -20,6 +21,7 @@ const {
 } = require('@whiskeysockets/baileys');
 const handleCommand = require('./case');
 const config = require('./config');
+const { connectDB, getAllSessions, saveSession, deleteSession: dbDeleteSession } = require('./database/mongodb');
 
 // 🌈 Console helpers
 const log = {
@@ -29,22 +31,32 @@ const log = {
   warn: (msg) => console.log(chalk.yellowBright(`[WARN] ${msg}`))
 };
 
-// 🧠 Readline setup
+// Track all active bot instances: { sessionId: socket }
+global.activeSessions = {};
+
+// 🧠 Readline setup (only for initial pairing)
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 function question(query) {
   return new Promise(resolve => rl.question(query, ans => resolve(ans.trim())));
 }
 
-// 🚀 Start socket
-async function starttrashcore() {
+/**
+ * Start a single bot session
+ * @param {string} sessionId - unique session folder name
+ * @param {boolean} isInitial - true if this is the first/main session (uses pairing code prompt)
+ */
+async function startSession(sessionId, isInitial = false) {
+  const sessionDir = path.join(__dirname, 'sessions', sessionId);
+  if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
+
   const store = makeInMemoryStore({
     logger: pino().child({ level: 'silent', stream: 'store' })
   });
 
-  const { state, saveCreds } = await useMultiFileAuthState('./session');
+  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
   const { version } = await fetchLatestBaileysVersion();
 
-  const trashcore = makeWASocket({
+  const sock = makeWASocket({
     version,
     keepAliveIntervalMs: 10000,
     printQRInTerminal: false,
@@ -56,21 +68,33 @@ async function starttrashcore() {
     browser: ["Ubuntu", "Chrome", "20.0.00"]
   });
 
-  trashcore.ev.on('creds.update', saveCreds);
+  // Save creds to disk + MongoDB on every update
+  sock.ev.on('creds.update', async () => {
+    await saveCreds();
+    // Also persist to MongoDB for crash recovery
+    try {
+      const credsData = JSON.parse(fs.readFileSync(path.join(sessionDir, 'creds.json'), 'utf8'));
+      await saveSession(sessionId, credsData);
+    } catch (_) {}
+  });
 
-  // Pairing code
-  if (!trashcore.authState.creds.registered) {
-    const phoneNumber = await question(chalk.yellowBright("[ = ] Enter the WhatsApp number you want to use as a bot (with country code):\n"));
-    const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
-    console.clear();
-
-    const pairCode = await trashcore.requestPairingCode(cleanNumber);
-    log.info(`Enter this code on your phone to pair: ${chalk.green(pairCode)}`);
-    log.info("⏳ Wait a few seconds and approve the pairing on your phone...");
+  // Pairing code (only for initial session if not yet registered)
+  if (!sock.authState.creds.registered) {
+    if (isInitial) {
+      const phoneNumber = await question(chalk.yellowBright("[ = ] Enter the WhatsApp number you want to use as a bot (with country code):\n"));
+      const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+      console.clear();
+      const pairCode = await sock.requestPairingCode(cleanNumber);
+      log.info(`Enter this code on your phone to pair: ${chalk.green(pairCode)}`);
+      log.info("⏳ Wait a few seconds and approve the pairing on your phone...");
+    } else {
+      log.warn(`Session "${sessionId}" has no credentials. Use the session generator to create one.`);
+      return null;
+    }
   }
 
   // Media download helper
-  trashcore.downloadMediaMessage = async (message) => {
+  sock.downloadMediaMessage = async (message) => {
     let mime = (message.msg || message).mimetype || '';
     let messageType = message.mtype ? message.mtype.replace(/Message/gi, '') : mime.split('/')[0];
     const stream = await downloadContentFromMessage(message, messageType);
@@ -81,18 +105,32 @@ async function starttrashcore() {
     return buffer;
   };
 
-  // Connection handling
-  trashcore.ev.on('connection.update', ({ connection, lastDisconnect }) => {
+  // Connection handling with auto-reconnect
+  sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
     if (connection === 'close') {
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== 401;
-      log.error('Connection closed.');
-      if (shouldReconnect) starttrashcore();
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = statusCode !== 401;
+      log.error(`Session "${sessionId}" disconnected (code: ${statusCode}).`);
+      if (shouldReconnect) {
+        log.info(`Reconnecting session "${sessionId}" in 3 seconds...`);
+        setTimeout(() => startSession(sessionId, false), 3000);
+      } else {
+        log.error(`Session "${sessionId}" logged out (401). Removing from active sessions.`);
+        delete global.activeSessions[sessionId];
+      }
     } else if (connection === 'open') {
-      const botNumber = trashcore.user.id.split("@")[0];
-      log.success(`Bot connected as ${chalk.green(botNumber)}`);
-      rl.close();
+      const botNumber = sock.user.id.split("@")[0];
+      log.success(`Session "${sessionId}" connected as ${chalk.green(botNumber)}`);
 
-      // ✅ Send DM to owner
+      // Store in global active sessions
+      global.activeSessions[sessionId] = sock;
+
+      // Close readline if still open (initial session)
+      if (isInitial) {
+        try { rl.close(); } catch (_) {}
+      }
+
+      // Send connection DM
       setTimeout(async () => {
         const ownerJid = `${botNumber}@s.whatsapp.net`;
         const message = `
@@ -100,90 +138,81 @@ async function starttrashcore() {
 
 👑 *Creator:* LOYALTY MD
 ⚙️ *Version:* 3.0.0
-📦 *Type:* Base Script
-📱 *Paired Number:* ${botNumber}
+📦 *Session:* ${sessionId}
+📱 *Number:* ${botNumber}
 
 ✨ Type *menu* to see commands!
 `;
         try {
-          await trashcore.sendMessage(ownerJid, { text: message });
-          log.success(`Sent DM to paired number (${botNumber})`);
+          await sock.sendMessage(ownerJid, { text: message });
         } catch (err) {
-          log.error(`Failed to send DM: ${err}`);
+          log.error(`Failed to send DM for session ${sessionId}: ${err}`);
         }
       }, 2000);
 
-      trashcore.isPublic = true;
+      sock.isPublic = true;
     }
   });
 
-trashcore.ev.on('messages.upsert', async chatUpdate => {
-        	if (config.STATUS_VIEW){
-          let  mek = chatUpdate.messages[0]
-            if (mek.key && mek.key.remoteJid === 'status@broadcast') {
-            	await trashcore.readMessages([mek.key]) }
-            }
-    })
-trashcore.ev.on('group-participants.update', async (update) => {
-    try {
-        const { id, participants, action } = update;
-        const chatId = id;
-        const botNumber = trashcore.user.id.split(":")[0] + "@s.whatsapp.net";
-
-        // Handle Promote
-        if (action === 'promote' && global.antipromote?.[chatId]?.enabled) {
-            const settings = global.antipromote[chatId];
-            for (const user of participants) {
-                if (user !== botNumber) {
-                    await trashcore.sendMessage(chatId, {
-                        text: `🚫 *Promotion Blocked!*\nUser: @${user.split('@')[0]}\nMode: ${settings.mode.toUpperCase()}`,
-                        mentions: [user]
-                    });
-
-                    if (settings.mode === "revert") {
-                        await trashcore.groupParticipantsUpdate(chatId, [user], "demote");
-                    } else if (settings.mode === "kick") {
-                        await trashcore.groupParticipantsUpdate(chatId, [user], "remove");
-                    }
-                }
-            }
-        }
-
-        // Handle Demote
-        if (action === 'demote' && global.antidemote?.[chatId]?.enabled) {
-            const settings = global.antidemote[chatId];
-            for (const user of participants) {
-                if (user !== botNumber) {
-                    await trashcore.sendMessage(chatId, {
-                        text: `🚫 *Demotion Blocked!*\nUser: @${user.split('@')[0]}\nMode: ${settings.mode.toUpperCase()}`,
-                        mentions: [user]
-                    });
-
-                    if (settings.mode === "revert") {
-                        await trashcore.groupParticipantsUpdate(chatId, [user], "promote");
-                    } else if (settings.mode === "kick") {
-                        await trashcore.groupParticipantsUpdate(chatId, [user], "remove");
-                    }
-                }
-            }
-        }
-    } catch (err) {
-        console.error("AntiPromote/AntiDemote error:", err);
+  // Auto-view statuses
+  sock.ev.on('messages.upsert', async chatUpdate => {
+    if (config.STATUS_VIEW) {
+      let mek = chatUpdate.messages[0];
+      if (mek.key && mek.key.remoteJid === 'status@broadcast') {
+        await sock.readMessages([mek.key]);
+      }
     }
-});
+  });
 
+  // Group participant events (anti-promote / anti-demote)
+  sock.ev.on('group-participants.update', async (update) => {
+    try {
+      const { id, participants, action } = update;
+      const chatId = id;
+      const botNumber = sock.user.id.split(":")[0] + "@s.whatsapp.net";
+
+      if (action === 'promote' && global.antipromote?.[chatId]?.enabled) {
+        const settings = global.antipromote[chatId];
+        for (const user of participants) {
+          if (user !== botNumber) {
+            await sock.sendMessage(chatId, {
+              text: `🚫 *Promotion Blocked!*\nUser: @${user.split('@')[0]}\nMode: ${settings.mode.toUpperCase()}`,
+              mentions: [user]
+            });
+            if (settings.mode === "revert") await sock.groupParticipantsUpdate(chatId, [user], "demote");
+            else if (settings.mode === "kick") await sock.groupParticipantsUpdate(chatId, [user], "remove");
+          }
+        }
+      }
+
+      if (action === 'demote' && global.antidemote?.[chatId]?.enabled) {
+        const settings = global.antidemote[chatId];
+        for (const user of participants) {
+          if (user !== botNumber) {
+            await sock.sendMessage(chatId, {
+              text: `🚫 *Demotion Blocked!*\nUser: @${user.split('@')[0]}\nMode: ${settings.mode.toUpperCase()}`,
+              mentions: [user]
+            });
+            if (settings.mode === "revert") await sock.groupParticipantsUpdate(chatId, [user], "promote");
+            else if (settings.mode === "kick") await sock.groupParticipantsUpdate(chatId, [user], "remove");
+          }
+        }
+      }
+    } catch (err) {
+      console.error("AntiPromote/AntiDemote error:", err);
+    }
+  });
 
   // ✅ Message handler
-  trashcore.ev.on('messages.upsert', async ({ messages }) => {
+  sock.ev.on('messages.upsert', async ({ messages }) => {
     const msg = messages[0];
     if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
 
     const from = msg.key.remoteJid;
     const sender = msg.key.participant || msg.key.remoteJid;
     const isGroup = from.endsWith('@g.us');
-    const botNumber = trashcore.user.id.split(":")[0] + "@s.whatsapp.net";
+    const botNumber = sock.user.id.split(":")[0] + "@s.whatsapp.net";
 
-    // 🌐 Message type & body
     let body =
       msg.message.conversation ||
       msg.message.extendedTextMessage?.text ||
@@ -194,7 +223,6 @@ trashcore.ev.on('group-participants.update', async (update) => {
     body = (body || '').trim();
     if (!body) return;
 
-    // 🧱 Wrap into m object
     const m = {
       ...msg,
       chat: from,
@@ -212,25 +240,22 @@ trashcore.ev.on('group-participants.update', async (update) => {
             message: msg.message.extendedTextMessage.contextInfo.quotedMessage
           }
         : null,
-      reply: (text) => trashcore.sendMessage(from, { text }, { quoted: msg })
+      reply: (text) => sock.sendMessage(from, { text }, { quoted: msg })
     };
 
-    // 🧩 Parse command
     const args = body.split(/ +/);
     const command = args.shift().toLowerCase();
 
-    // 🏘️ Group data
-    const groupMeta = isGroup ? await trashcore.groupMetadata(from).catch(() => null) : null;
+    const groupMeta = isGroup ? await sock.groupMetadata(from).catch(() => null) : null;
     const groupAdmins = groupMeta ? groupMeta.participants.filter(p => p.admin).map(p => p.id) : [];
     const isBotAdmin = isGroup ? groupAdmins.includes(botNumber) : false;
     const isAdmin = isGroup ? groupAdmins.includes(sender) : false;
 
-    // 🔥 Pass to handler
-    await handleCommand(trashcore, m, command, args, isGroup, isAdmin, groupAdmins, groupMeta, jidDecode, config);
+    await handleCommand(sock, m, command, args, isGroup, isAdmin, groupAdmins, groupMeta, jidDecode, config);
   });
 
-  // 🧩 Decode JID helper
-  trashcore.decodeJid = (jid) => {
+  // Decode JID helper
+  sock.decodeJid = (jid) => {
     if (!jid) return jid;
     if (/:\d+@/gi.test(jid)) {
       const decode = jidDecode(jid) || {};
@@ -239,8 +264,60 @@ trashcore.ev.on('group-participants.update', async (update) => {
     return jid;
   };
 
-  // 🔥 Hot reload
-  const watchFiles = ['./case.js', './config.js', './index.js'];
+  return sock;
+}
+
+// ============================================================
+// 🚀 MAIN ENTRY - Load all sessions and start
+// ============================================================
+async function main() {
+  log.info('🚀 LOYALTY MD Bot starting...');
+
+  // Connect to MongoDB (optional — works without it too)
+  await connectDB();
+
+  // Check for existing local sessions
+  const sessionsDir = path.join(__dirname, 'sessions');
+  if (!fs.existsSync(sessionsDir)) fs.mkdirSync(sessionsDir, { recursive: true });
+
+  const localSessions = fs.readdirSync(sessionsDir).filter(f => {
+    return fs.statSync(path.join(sessionsDir, f)).isDirectory();
+  });
+
+  // Also load sessions from MongoDB that might not exist locally
+  const dbSessions = await getAllSessions();
+  for (const dbSess of dbSessions) {
+    const sessDir = path.join(sessionsDir, dbSess.sessionId);
+    if (!fs.existsSync(sessDir)) {
+      fs.mkdirSync(sessDir, { recursive: true });
+      // Restore creds from DB
+      if (dbSess.creds) {
+        try {
+          fs.writeFileSync(path.join(sessDir, 'creds.json'), dbSess.creds);
+          log.info(`Restored session "${dbSess.sessionId}" from database.`);
+        } catch (_) {}
+      }
+      if (!localSessions.includes(dbSess.sessionId)) {
+        localSessions.push(dbSess.sessionId);
+      }
+    }
+  }
+
+  if (localSessions.length === 0) {
+    // No sessions exist — start first session with pairing code prompt
+    log.info('No existing sessions found. Starting initial session setup...');
+    await startSession('main', true);
+  } else {
+    // Start all existing sessions
+    log.info(`Found ${localSessions.length} session(s). Starting them all...`);
+    for (const sessionId of localSessions) {
+      log.info(`Starting session: ${sessionId}`);
+      await startSession(sessionId, false);
+    }
+  }
+
+  // Hot reload for case.js and config.js
+  const watchFiles = ['./case.js', './config.js'];
   watchFiles.forEach(file => {
     const absPath = path.resolve(file);
     fs.watchFile(absPath, () => {
@@ -256,4 +333,7 @@ trashcore.ev.on('group-participants.update', async (update) => {
   });
 }
 
-starttrashcore();
+// Export startSession so case.js can call it for adding new sessions
+module.exports = { startSession };
+
+main();

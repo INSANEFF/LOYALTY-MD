@@ -4,7 +4,8 @@ module.exports = {
   OWNER_NUMBER: '255778104517',
   SESSION_DIR: './trash_baileys',
   NO_PREFIX: true,
-  STATUS_VIEW: true
+  STATUS_VIEW: true,
+  MONGODB_URI: process.env.MONGODB_URI || '',
 };
 
 

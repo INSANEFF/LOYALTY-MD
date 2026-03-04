@@ -244,6 +244,11 @@ Uptime: ${formatUptime(process.uptime())}
 • public 
 • private 
 
+📱 SESSIONS
+• addsession
+• delsession
+• sessions
+
 🥁 ANALYSIS 
 • weather 
 • checktime 
@@ -822,6 +827,87 @@ case 'public': {
     if (!isOwner) return reply("❌ This command is for owner-only.");
     trashcore.isPublic = true;
     await reply("🌍 Bot switched to *public mode*. Everyone can use commands now.");
+    break;
+}
+
+// ================= SESSION MANAGEMENT =================
+case 'addsession': {
+    if (!isOwner) return reply("❌ Owner only.");
+    if (!args[0]) return reply(`📲 Provide a session ID!\nExample: addsession <session_id>\n\nGet one at: https://loyalty-md-session.vercel.app`);
+    
+    const newSessionId = args[0].trim();
+    const sessionsDir = require('path').join(__dirname, 'sessions', newSessionId);
+    
+    if (global.activeSessions[newSessionId]) {
+        return reply(`⚠️ Session "${newSessionId}" is already running!`);
+    }
+    
+    try {
+        const { startSession } = require('./index');
+        await reply(`⏳ Starting session "${newSessionId}"...`);
+        const sock = await startSession(newSessionId, false);
+        if (sock) {
+            await reply(`✅ Session "${newSessionId}" added and connecting!`);
+        } else {
+            await reply(`❌ Could not start session. Make sure the session ID is valid and has credentials.`);
+        }
+    } catch (err) {
+        console.error('addsession error:', err);
+        await reply(`❌ Error: ${err.message}`);
+    }
+    break;
+}
+
+case 'delsession': {
+    if (!isOwner) return reply("❌ Owner only.");
+    if (!args[0]) return reply(`🗑️ Provide the session name to delete.\nExample: delsession <session_name>`);
+    
+    const delId = args[0].trim();
+    
+    if (delId === 'main') return reply(`❌ Cannot delete the main session!`);
+    
+    try {
+        // Disconnect the socket if active
+        if (global.activeSessions[delId]) {
+            try { global.activeSessions[delId].end(); } catch (_) {}
+            delete global.activeSessions[delId];
+        }
+        
+        // Remove local session files
+        const sessionPath = require('path').join(__dirname, 'sessions', delId);
+        if (require('fs').existsSync(sessionPath)) {
+            require('fs').rmSync(sessionPath, { recursive: true, force: true });
+        }
+        
+        // Remove from DB
+        const { deleteSession } = require('./database/mongodb');
+        await deleteSession(delId);
+        
+        await reply(`✅ Session "${delId}" has been deleted and disconnected.`);
+    } catch (err) {
+        console.error('delsession error:', err);
+        await reply(`❌ Error: ${err.message}`);
+    }
+    break;
+}
+
+case 'sessions':
+case 'listsessions': {
+    if (!isOwner) return reply("❌ Owner only.");
+    
+    const activeIds = Object.keys(global.activeSessions || {});
+    if (activeIds.length === 0) {
+        return reply('📵 No active sessions.');
+    }
+    
+    let list = `📱 *Active Sessions (${activeIds.length}):*\n\n`;
+    for (const sid of activeIds) {
+        const sock = global.activeSessions[sid];
+        const num = sock?.user?.id?.split(':')[0] || 'connecting...';
+        list += `• *${sid}* — ${num}\n`;
+    }
+    list += `\n🔗 Get session IDs at:\nhttps://loyalty-md-session.vercel.app`;
+    await reply(list);
     break;
 }
 
