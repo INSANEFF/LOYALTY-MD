@@ -1,0 +1,5 @@
+node_modules/
+session/
+trash_baileys/
+*.zip
+.env
