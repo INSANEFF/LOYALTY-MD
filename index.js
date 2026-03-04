@@ -68,15 +68,24 @@ async function startSession(sessionId, isInitial = false) {
 
   const sock = makeWASocket({
     version,
-    keepAliveIntervalMs: 10000,
+    keepAliveIntervalMs: 25000,
+    retryRequestDelayMs: 2000,
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000,
+    emitOwnEvents: true,
     printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }).child({ level: 'silent' }))
     },
-    browser: ["Ubuntu", "Chrome", "20.0.00"]
+    browser: ["Ubuntu", "Chrome", "20.0.00"],
+    markOnlineOnConnect: true,
+    generateHighQualityLinkPreview: false
   });
+
+  // Bind the in-memory store to the socket for message retry
+  store.bind(sock.ev);
 
   // Save creds to disk + MongoDB on every update
   sock.ev.on('creds.update', async () => {
@@ -305,6 +314,42 @@ async function main() {
   const sessionsDir = path.join(__dirname, 'sessions');
   if (!fs.existsSync(sessionsDir)) fs.mkdirSync(sessionsDir, { recursive: true });
 
+  // ============================================================
+  // 🔑 SESSION_ID ENV VAR — Bootstrap creds from env if provided
+  // ============================================================
+  const envSessionId = config.SESSION_ID || process.env.SESSION_ID || '';
+  if (envSessionId) {
+    log.info('Found SESSION_ID in environment. Bootstrapping session...');
+    try {
+      // Strip the LOYALTY-MD~ prefix if present
+      let credsB64 = envSessionId;
+      if (credsB64.startsWith('LOYALTY-MD~')) {
+        credsB64 = credsB64.replace('LOYALTY-MD~', '');
+      }
+      // Also handle LOYALTY-MD_ or LOYALTY_MD_ prefixes
+      credsB64 = credsB64.replace(/^LOYALTY[-_]MD[~_]/i, '');
+
+      const credsJson = Buffer.from(credsB64, 'base64').toString('utf8');
+      // Validate it's valid JSON
+      JSON.parse(credsJson);
+
+      const mainSessionDir = path.join(sessionsDir, 'main');
+      if (!fs.existsSync(mainSessionDir)) fs.mkdirSync(mainSessionDir, { recursive: true });
+
+      const credsPath = path.join(mainSessionDir, 'creds.json');
+      // Only write if creds.json doesn't exist yet (don't overwrite active session)
+      if (!fs.existsSync(credsPath)) {
+        fs.writeFileSync(credsPath, credsJson);
+        log.success('Session credentials written from SESSION_ID env var.');
+      } else {
+        log.info('creds.json already exists for main session, skipping env bootstrap.');
+      }
+    } catch (err) {
+      log.error(`Failed to parse SESSION_ID: ${err.message}`);
+      log.error('Make sure SESSION_ID is a valid LOYALTY-MD~<base64> value.');
+    }
+  }
+
   const localSessions = fs.readdirSync(sessionsDir).filter(f => {
     return fs.statSync(path.join(sessionsDir, f)).isDirectory();
   });
@@ -340,6 +385,16 @@ async function main() {
       await startSession(sessionId, false);
     }
   }
+
+  // ============================================================
+  // 💓 Keep-alive interval — prevents idle disconnections
+  // ============================================================
+  setInterval(() => {
+    const activeCount = Object.keys(global.activeSessions).length;
+    if (activeCount > 0) {
+      log.info(`💓 Keep-alive: ${activeCount} active session(s)`);
+    }
+  }, 5 * 60 * 1000); // every 5 minutes
 
   // Hot reload for case.js and config.js
   const watchFiles = ['./case.js', './config.js'];

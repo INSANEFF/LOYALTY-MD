@@ -2,5 +2,6 @@ node_modules/
 session/
 sessions/
 trash_baileys/
+data/
 *.zip
 .env
