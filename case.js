@@ -14,6 +14,8 @@ const { exec } = require('child_process');
 const path = require('path');
 const chalk = require('chalk');
 const { writeFile } = require('./library/utils');
+const config = require('./config');
+const { getOwners, addOwner, removeOwner, getSudo, addSudo, removeSudo } = require('./database/store');
 
 // =============== COLORS ===============
 const colors = {
@@ -67,10 +69,13 @@ module.exports = async function handleCommand(trashcore, m, command, isGroup, is
     const pushname = m.pushName || "Unknown User";
     const chatType = from.endsWith('@g.us') ? 'Group' : 'Private';
     const chatName = chatType === 'Group' ? (groupMeta?.subject || 'Unknown Group') : pushname;
-// Safe owner check
-const botNumber = trashcore.user.id.split(":")[0] + "@s.whatsapp.net";
+// Safe owner check — supports multiple owners + sudo users
+const botNumber = (trashcore.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
 const senderJid = m.key.participant || m.key.remoteJid;
-const isOwner = senderJid === botNumber;
+const senderNumber = senderJid.split('@')[0].split(':')[0];
+const ownersList = [config.OWNER_NUMBER, ...getOwners()].filter(Boolean);
+const isOwner = senderJid === botNumber || ownersList.includes(senderNumber);
+const isSudo = isOwner || getSudo().includes(senderNumber);
     const reply = (text) => trashcore.sendMessage(from, { text: stylishReply(text) }, { quoted: m });
 
     const ctx = m.message.extendedTextMessage?.contextInfo || {};
@@ -105,8 +110,8 @@ if (isGroup && global.antilink && global.antilink[from]?.enabled) {
         const settings = global.antilink[from];
         const groupMeta = await trashcore.groupMetadata(from);
         const groupAdmins = groupMeta.participants.filter(p => p.admin).map(p => p.id);
-        const botNumber = trashcore.user.id.split(":")[0] + "@s.whatsapp.net";
-        const isBotAdmin = groupAdmins.includes(botNumber);
+        const bNum = (trashcore.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
+        const isBotAdmin = groupAdmins.includes(bNum);
         const isSenderAdmin = groupAdmins.includes(sender);
 
         if (!isSenderAdmin && isBotAdmin) {
@@ -132,8 +137,8 @@ if (isGroup && global.antitag && global.antitag[from]?.enabled) {
     const settings = global.antitag[from];
     const groupMeta = await trashcore.groupMetadata(from);
     const groupAdmins = groupMeta.participants.filter(p => p.admin).map(p => p.id);
-    const botNumber = trashcore.user.id.split(":")[0] + "@s.whatsapp.net";
-    const isBotAdmin = groupAdmins.includes(botNumber);
+    const bNum = (trashcore.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
+    const isBotAdmin = groupAdmins.includes(bNum);
     const isSenderAdmin = groupAdmins.includes(m.sender);
 
     // Detect if message contains a mention
@@ -169,10 +174,10 @@ if (isGroup && global.antibadword?.[from]?.enabled) {
   const found = badwords.find(w => textMsg.includes(w));
 
   if (found) {
-    const botNumber = trashcore.user.id.split(":")[0] + "@s.whatsapp.net";
+    const bNum = (trashcore.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
     const groupMetadata = await trashcore.groupMetadata(from);
     const groupAdmins = groupMetadata.participants.filter(p => p.admin).map(p => p.id);
-    const isBotAdmin = groupAdmins.includes(botNumber);
+    const isBotAdmin = groupAdmins.includes(bNum);
     const isSenderAdmin = groupAdmins.includes(m.sender);
 
     if (!isSenderAdmin) {
@@ -210,8 +215,8 @@ if (isGroup && global.antibadword?.[from]?.enabled) {
   }
 }
 
-if (!trashcore.isPublic && !isOwner) {
-    return; // ignore all messages from non-owner when in private mode
+if (!trashcore.isPublic && !isOwner && !isSudo) {
+    return; // ignore all messages from non-owner/non-sudo when in private mode
 }
     try {
         switch (command) {
@@ -239,10 +244,20 @@ if (!trashcore.isPublic && !isOwner) {
 • public 
 • private 
 
-📱 SESSIONS
+🤖 BOT MANAGEMENT
+• addbot
+• delbot
 • addsession
 • delsession
 • sessions
+
+👑 OWNER / SUDO
+• addowner
+• delowner
+• addsudo
+• delsudo
+• listowners
+• listsudo
 
 🥁 ANALYSIS 
 • weather 
@@ -831,16 +846,16 @@ case 'addsession': {
     if (!args[0]) return reply(`📲 Provide a session ID!\nExample: addsession <session_id>\n\nGet one at: https://loyalty-md-session.vercel.app`);
     
     const newSessionId = args[0].trim();
-    const sessionsDir = require('path').join(__dirname, 'sessions', newSessionId);
     
     if (global.activeSessions[newSessionId]) {
         return reply(`⚠️ Session "${newSessionId}" is already running!`);
     }
     
     try {
-        const { startSession } = require('./index');
+        // Use global startSession to avoid circular require
+        if (!global.startSession) return reply('❌ Bot not fully initialized. Try again in a moment.');
         await reply(`⏳ Starting session "${newSessionId}"...`);
-        const sock = await startSession(newSessionId, false);
+        const sock = await global.startSession(newSessionId, false);
         if (sock) {
             await reply(`✅ Session "${newSessionId}" added and connecting!`);
         } else {
@@ -903,6 +918,196 @@ case 'listsessions': {
     }
     list += `\n🔗 Get session IDs at:\nhttps://loyalty-md-session.vercel.app`;
     await reply(list);
+    break;
+}
+
+// ================= ADD BOT (alias for addsession) =================
+case 'addbot': {
+    if (!isOwner) return reply("❌ Owner only.");
+    if (!args[0]) return reply(`🤖 Provide a session ID to add a new bot!\nExample: addbot <session_id>\n\nGet one at: https://loyalty-md-session.vercel.app`);
+    
+    const botSessionId = args[0].trim();
+    
+    if (global.activeSessions[botSessionId]) {
+        return reply(`⚠️ Bot "${botSessionId}" is already running!`);
+    }
+    
+    try {
+        if (!global.startSession) return reply('❌ Bot not fully initialized. Try again in a moment.');
+        await reply(`⏳ Adding bot "${botSessionId}"...`);
+        const newSock = await global.startSession(botSessionId, false);
+        if (newSock) {
+            await reply(`✅ Bot "${botSessionId}" added and connecting!\n\n📱 Active bots: ${Object.keys(global.activeSessions).length}`);
+        } else {
+            await reply(`❌ Could not start bot. Make sure the session ID is valid and has credentials.`);
+        }
+    } catch (err) {
+        console.error('addbot error:', err);
+        await reply(`❌ Error: ${err.message}`);
+    }
+    break;
+}
+
+// ================= DEL BOT (alias for delsession) =================
+case 'delbot': {
+    if (!isOwner) return reply("❌ Owner only.");
+    if (!args[0]) return reply(`🗑️ Provide the bot session to remove.\nExample: delbot <session_id>`);
+    
+    const delBotId = args[0].trim();
+    
+    if (delBotId === 'main') return reply(`❌ Cannot delete the main bot!`);
+    
+    try {
+        if (global.activeSessions[delBotId]) {
+            try { global.activeSessions[delBotId].end(); } catch (_) {}
+            delete global.activeSessions[delBotId];
+        }
+        
+        const sessionPath = path.join(__dirname, 'sessions', delBotId);
+        if (fs.existsSync(sessionPath)) {
+            fs.rmSync(sessionPath, { recursive: true, force: true });
+        }
+        
+        const { deleteSession } = require('./database/mongodb');
+        await deleteSession(delBotId);
+        
+        await reply(`✅ Bot "${delBotId}" removed and disconnected.\n\n📱 Remaining bots: ${Object.keys(global.activeSessions).length}`);
+    } catch (err) {
+        console.error('delbot error:', err);
+        await reply(`❌ Error: ${err.message}`);
+    }
+    break;
+}
+
+// ================= ADD OWNER =================
+case 'addowner': {
+    if (!isOwner) return reply("❌ Only existing owners can add new owners.");
+    if (!args[0]) return reply(`👑 Provide a phone number to add as owner.\nExample: addowner 2547xxxxxxxx`);
+    
+    try {
+        const num = args[0].replace(/[^0-9]/g, '');
+        if (num.length < 7) return reply("❌ Invalid phone number.");
+        
+        const added = addOwner(num);
+        if (added) {
+            await reply(`✅ @${num} has been added as an *owner*!\n\nThey can now use all owner commands.`);
+        } else {
+            await reply(`⚠️ ${num} is already an owner.`);
+        }
+    } catch (err) {
+        console.error('addowner error:', err);
+        await reply(`❌ Error: ${err.message}`);
+    }
+    break;
+}
+
+// ================= DEL OWNER =================
+case 'delowner':
+case 'removeowner': {
+    if (!isOwner) return reply("❌ Only owners can remove other owners.");
+    if (!args[0]) return reply(`🗑️ Provide the number to remove from owners.\nExample: delowner 2547xxxxxxxx`);
+    
+    try {
+        const num = args[0].replace(/[^0-9]/g, '');
+        if (num === config.OWNER_NUMBER) return reply("❌ Cannot remove the primary owner from config!");
+        
+        const removed = removeOwner(num);
+        if (removed) {
+            await reply(`✅ ${num} has been removed from owners.`);
+        } else {
+            await reply(`⚠️ ${num} is not in the owners list.`);
+        }
+    } catch (err) {
+        console.error('delowner error:', err);
+        await reply(`❌ Error: ${err.message}`);
+    }
+    break;
+}
+
+// ================= LIST OWNERS =================
+case 'listowners':
+case 'owners': {
+    if (!isOwner) return reply("❌ Owner only.");
+    
+    try {
+        const dynamicOwners = getOwners();
+        let ownerText = `👑 *Owner List:*\n\n`;
+        ownerText += `• *${config.OWNER_NUMBER}* (primary - config)\n`;
+        if (dynamicOwners.length > 0) {
+            for (const o of dynamicOwners) {
+                ownerText += `• *${o}* (added)\n`;
+            }
+        }
+        ownerText += `\nTotal: ${1 + dynamicOwners.length} owner(s)`;
+        await reply(ownerText);
+    } catch (err) {
+        console.error('listowners error:', err);
+        await reply(`❌ Error: ${err.message}`);
+    }
+    break;
+}
+
+// ================= ADD SUDO / SUB-USER =================
+case 'sudo':
+case 'addsudo': {
+    if (!isOwner) return reply("❌ Only owners can add sudo users.");
+    if (!args[0]) return reply(`🔑 Provide a phone number to add as sudo.\nExample: sudo 2547xxxxxxxx\n\nSudo users can use the bot in private mode and some elevated commands.`);
+    
+    try {
+        const num = args[0].replace(/[^0-9]/g, '');
+        if (num.length < 7) return reply("❌ Invalid phone number.");
+        
+        const added = addSudo(num);
+        if (added) {
+            await reply(`✅ @${num} has been added as a *sudo user*!\n\nThey can now use the bot in private mode.`);
+        } else {
+            await reply(`⚠️ ${num} is already a sudo user.`);
+        }
+    } catch (err) {
+        console.error('addsudo error:', err);
+        await reply(`❌ Error: ${err.message}`);
+    }
+    break;
+}
+
+// ================= DEL SUDO =================
+case 'delsudo':
+case 'removesudo': {
+    if (!isOwner) return reply("❌ Only owners can remove sudo users.");
+    if (!args[0]) return reply(`🗑️ Provide the number to remove from sudo.\nExample: delsudo 2547xxxxxxxx`);
+    
+    try {
+        const num = args[0].replace(/[^0-9]/g, '');
+        const removed = removeSudo(num);
+        if (removed) {
+            await reply(`✅ ${num} has been removed from sudo users.`);
+        } else {
+            await reply(`⚠️ ${num} is not in the sudo list.`);
+        }
+    } catch (err) {
+        console.error('delsudo error:', err);
+        await reply(`❌ Error: ${err.message}`);
+    }
+    break;
+}
+
+// ================= LIST SUDO =================
+case 'listsudo': {
+    if (!isOwner) return reply("❌ Owner only.");
+    
+    try {
+        const sudoList = getSudo();
+        if (sudoList.length === 0) return reply("📵 No sudo users added yet.");
+        
+        let sudoText = `🔑 *Sudo Users (${sudoList.length}):*\n\n`;
+        for (const s of sudoList) {
+            sudoText += `• *${s}*\n`;
+        }
+        await reply(sudoText);
+    } catch (err) {
+        console.error('listsudo error:', err);
+        await reply(`❌ Error: ${err.message}`);
+    }
     break;
 }
 
@@ -1431,7 +1636,7 @@ case 'promote': {
             .map(p => p.id.replace(/[^0-9]/g, ''));
 
         const senderNumber = m.sender.replace(/[^0-9]/g, '');
-        const botNumber = trashcore.user.id.replace(/[^0-9]/g, '');
+        const botNumber = (trashcore.user?.id || '').replace(/[^0-9]/g, '');
 
         const isSenderAdmin = groupAdmins.includes(senderNumber);
             if (!isAdmin && !isOwner) return reply("⚠️ Only admins or the owner can use this command!");
@@ -1480,7 +1685,7 @@ case 'demote': {
             .map(p => p.id);
 
         const senderJid = m.sender;
-        const botJid = trashcore.user.id;
+        const botJid = trashcore.user?.id || '';
 
         const isSenderAdmin = groupAdmins.includes(senderJid);
         const isBotAdmin = groupAdmins.includes(botJid);

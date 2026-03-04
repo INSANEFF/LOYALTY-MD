@@ -41,6 +41,8 @@ const log = {
 
 // Track all active bot instances: { sessionId: socket }
 global.activeSessions = {};
+// Track reconnect attempts per session for exponential backoff
+global.reconnectAttempts = {};
 
 // 🧠 Readline setup (only for initial pairing)
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -113,35 +115,45 @@ async function startSession(sessionId, isInitial = false) {
     return buffer;
   };
 
-  // Connection handling with auto-reconnect
+  // Connection handling with auto-reconnect + exponential backoff
   sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
-    if (connection === 'close') {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== 401;
-      log.error(`Session "${sessionId}" disconnected (code: ${statusCode}).`);
-      if (shouldReconnect) {
-        log.info(`Reconnecting session "${sessionId}" in 3 seconds...`);
-        setTimeout(() => startSession(sessionId, false), 3000);
-      } else {
-        log.error(`Session "${sessionId}" logged out (401). Removing from active sessions.`);
+    try {
+      if (connection === 'close') {
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const shouldReconnect = statusCode !== 401;
+        log.error(`Session "${sessionId}" disconnected (code: ${statusCode}).`);
+        // Remove from active sessions on disconnect
         delete global.activeSessions[sessionId];
-      }
-    } else if (connection === 'open') {
-      const botNumber = sock.user.id.split("@")[0];
-      log.success(`Session "${sessionId}" connected as ${chalk.green(botNumber)}`);
+        if (shouldReconnect) {
+          // Exponential backoff: 3s, 6s, 12s, 24s, max 30s
+          const attempts = (global.reconnectAttempts[sessionId] || 0) + 1;
+          global.reconnectAttempts[sessionId] = attempts;
+          const delay = Math.min(3000 * Math.pow(2, attempts - 1), 30000);
+          log.info(`Reconnecting session "${sessionId}" in ${delay / 1000}s (attempt #${attempts})...`);
+          setTimeout(() => startSession(sessionId, false), delay);
+        } else {
+          log.error(`Session "${sessionId}" logged out (401). Not reconnecting.`);
+          delete global.reconnectAttempts[sessionId];
+        }
+      } else if (connection === 'open') {
+        // Reset reconnect counter on successful connection
+        global.reconnectAttempts[sessionId] = 0;
+        const botNumber = sock.user?.id?.split("@")[0]?.split(":")[0] || 'unknown';
+        log.success(`Session "${sessionId}" connected as ${chalk.green(botNumber)}`);
 
-      // Store in global active sessions
-      global.activeSessions[sessionId] = sock;
+        // Store in global active sessions
+        global.activeSessions[sessionId] = sock;
 
-      // Close readline if still open (initial session)
-      if (isInitial) {
-        try { rl.close(); } catch (_) {}
-      }
+        // Close readline if still open (initial session)
+        if (isInitial) {
+          try { rl.close(); } catch (_) {}
+        }
 
-      // Send connection DM
-      setTimeout(async () => {
-        const ownerJid = `${botNumber}@s.whatsapp.net`;
-        const message = `
+        // Send connection DM
+        setTimeout(async () => {
+          try {
+            const ownerJid = (sock.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
+            const message = `
 ✅ *Bot Connected Successfully!*
 
 👑 *Creator:* LOYALTY MD
@@ -151,14 +163,16 @@ async function startSession(sessionId, isInitial = false) {
 
 ✨ Type *menu* to see commands!
 `;
-        try {
-          await sock.sendMessage(ownerJid, { text: message });
-        } catch (err) {
-          log.error(`Failed to send DM for session ${sessionId}: ${err}`);
-        }
-      }, 2000);
+            await sock.sendMessage(ownerJid, { text: message });
+          } catch (err) {
+            log.error(`Failed to send DM for session ${sessionId}: ${err.message || err}`);
+          }
+        }, 3000);
 
-      sock.isPublic = true;
+        sock.isPublic = true;
+      }
+    } catch (err) {
+      console.error(`connection.update error for session ${sessionId}:`, err);
     }
   });
 
@@ -167,7 +181,7 @@ async function startSession(sessionId, isInitial = false) {
     try {
       const { id, participants, action } = update;
       const chatId = id;
-      const botNumber = sock.user.id.split(":")[0] + "@s.whatsapp.net";
+      const botNumber = (sock.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
 
       if (action === 'promote' && global.antipromote?.[chatId]?.enabled) {
         const settings = global.antipromote[chatId];
@@ -219,7 +233,7 @@ async function startSession(sessionId, isInitial = false) {
       const from = msg.key.remoteJid;
       const sender = msg.key.participant || msg.key.remoteJid;
       const isGroup = from.endsWith('@g.us');
-      const botNumber = sock.user.id.split(":")[0] + "@s.whatsapp.net";
+      const botNumber = (sock.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
 
       let body =
         msg.message.conversation ||
@@ -259,7 +273,7 @@ async function startSession(sessionId, isInitial = false) {
       const isBotAdmin = isGroup ? groupAdmins.includes(botNumber) : false;
       const isAdmin = isGroup ? groupAdmins.includes(sender) : false;
 
-      await handleCommand(sock, m, command, args, isGroup, isAdmin, groupAdmins, groupMeta, jidDecode, config);
+      await handleCommand(sock, m, command, isGroup, isAdmin, groupAdmins, isBotAdmin, groupMeta, config);
     } catch (err) {
       console.error('Message handler error:', err);
     }
@@ -344,7 +358,9 @@ async function main() {
   });
 }
 
-// Export startSession so case.js can call it for adding new sessions
+// Make startSession globally available for case.js (avoids circular require)
+global.startSession = startSession;
+
 module.exports = { startSession };
 
 main();
