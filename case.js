@@ -219,13 +219,8 @@ if (!trashcore.isPublic && !isOwner) {
             case 'ping':
             case 'alive': {
                 const start = Date.now();
-                await reply("⏳ Pinging...");
-                const end = Date.now();
-                const latency = end - start;
-                await reply(`Pong!
- Latency: ${latency}ms
-Uptime: ${formatUptime(process.uptime())}
- Owner: LOYALTY MD`);
+                const latency = Date.now() - start;
+                await reply(`Pong!\n Latency: ${latency}ms\nUptime: ${formatUptime(process.uptime())}\n Owner: LOYALTY MD`);
                 break;
             }
 

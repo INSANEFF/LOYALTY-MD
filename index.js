@@ -23,6 +23,14 @@ const handleCommand = require('./case');
 const config = require('./config');
 const { connectDB, getAllSessions, saveSession, deleteSession: dbDeleteSession } = require('./database/mongodb');
 
+// 🛡️ Prevent crashes from unhandled errors
+process.on('uncaughtException', (err) => {
+  console.error('[UNCAUGHT]', err.message);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('[UNHANDLED]', err?.message || err);
+});
+
 // 🌈 Console helpers
 const log = {
   info: (msg) => console.log(chalk.cyanBright(`[INFO] ${msg}`)),
@@ -154,16 +162,6 @@ async function startSession(sessionId, isInitial = false) {
     }
   });
 
-  // Auto-view statuses
-  sock.ev.on('messages.upsert', async chatUpdate => {
-    if (config.STATUS_VIEW) {
-      let mek = chatUpdate.messages[0];
-      if (mek.key && mek.key.remoteJid === 'status@broadcast') {
-        await sock.readMessages([mek.key]);
-      }
-    }
-  });
-
   // Group participant events (anti-promote / anti-demote)
   sock.ev.on('group-participants.update', async (update) => {
     try {
@@ -203,55 +201,68 @@ async function startSession(sessionId, isInitial = false) {
     }
   });
 
-  // ✅ Message handler
+  // Auto-view statuses + Message handler (SINGLE listener to prevent spam)
   sock.ev.on('messages.upsert', async ({ messages }) => {
-    const msg = messages[0];
-    if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
+    try {
+      const msg = messages[0];
+      if (!msg.message) return;
 
-    const from = msg.key.remoteJid;
-    const sender = msg.key.participant || msg.key.remoteJid;
-    const isGroup = from.endsWith('@g.us');
-    const botNumber = sock.user.id.split(":")[0] + "@s.whatsapp.net";
+      // Auto-view statuses
+      if (config.STATUS_VIEW && msg.key && msg.key.remoteJid === 'status@broadcast') {
+        try { await sock.readMessages([msg.key]); } catch (_) {}
+        return;
+      }
 
-    let body =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      msg.message.imageMessage?.caption ||
-      msg.message.videoMessage?.caption ||
-      msg.message.documentMessage?.caption ||
-      '';
-    body = (body || '').trim();
-    if (!body) return;
+      // Skip status broadcasts for command handling
+      if (msg.key.remoteJid === 'status@broadcast') return;
 
-    const m = {
-      ...msg,
-      chat: from,
-      sender,
-      isGroup,
-      body,
-      type: Object.keys(msg.message)[0],
-      quoted: msg.message?.extendedTextMessage?.contextInfo?.quotedMessage
-        ? {
-            key: {
-              remoteJid: msg.message.extendedTextMessage.contextInfo.remoteJid,
-              id: msg.message.extendedTextMessage.contextInfo.stanzaId,
-              participant: msg.message.extendedTextMessage.contextInfo.participant
-            },
-            message: msg.message.extendedTextMessage.contextInfo.quotedMessage
-          }
-        : null,
-      reply: (text) => sock.sendMessage(from, { text }, { quoted: msg })
-    };
+      const from = msg.key.remoteJid;
+      const sender = msg.key.participant || msg.key.remoteJid;
+      const isGroup = from.endsWith('@g.us');
+      const botNumber = sock.user.id.split(":")[0] + "@s.whatsapp.net";
 
-    const args = body.split(/ +/);
-    const command = args.shift().toLowerCase();
+      let body =
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text ||
+        msg.message.imageMessage?.caption ||
+        msg.message.videoMessage?.caption ||
+        msg.message.documentMessage?.caption ||
+        '';
+      body = (body || '').trim();
+      if (!body) return;
 
-    const groupMeta = isGroup ? await sock.groupMetadata(from).catch(() => null) : null;
-    const groupAdmins = groupMeta ? groupMeta.participants.filter(p => p.admin).map(p => p.id) : [];
-    const isBotAdmin = isGroup ? groupAdmins.includes(botNumber) : false;
-    const isAdmin = isGroup ? groupAdmins.includes(sender) : false;
+      const m = {
+        ...msg,
+        chat: from,
+        sender,
+        isGroup,
+        body,
+        type: Object.keys(msg.message)[0],
+        quoted: msg.message?.extendedTextMessage?.contextInfo?.quotedMessage
+          ? {
+              key: {
+                remoteJid: msg.message.extendedTextMessage.contextInfo.remoteJid,
+                id: msg.message.extendedTextMessage.contextInfo.stanzaId,
+                participant: msg.message.extendedTextMessage.contextInfo.participant
+              },
+              message: msg.message.extendedTextMessage.contextInfo.quotedMessage
+            }
+          : null,
+        reply: (text) => sock.sendMessage(from, { text }, { quoted: msg })
+      };
 
-    await handleCommand(sock, m, command, args, isGroup, isAdmin, groupAdmins, groupMeta, jidDecode, config);
+      const args = body.split(/ +/);
+      const command = args.shift().toLowerCase();
+
+      const groupMeta = isGroup ? await sock.groupMetadata(from).catch(() => null) : null;
+      const groupAdmins = groupMeta ? groupMeta.participants.filter(p => p.admin).map(p => p.id) : [];
+      const isBotAdmin = isGroup ? groupAdmins.includes(botNumber) : false;
+      const isAdmin = isGroup ? groupAdmins.includes(sender) : false;
+
+      await handleCommand(sock, m, command, args, isGroup, isAdmin, groupAdmins, groupMeta, jidDecode, config);
+    } catch (err) {
+      console.error('Message handler error:', err);
+    }
   });
 
   // Decode JID helper
