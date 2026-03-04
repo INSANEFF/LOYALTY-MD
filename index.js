@@ -4,6 +4,7 @@
   Multi-Session WhatsApp Bot
 */
 
+const http = require('http');
 const fs = require('fs');
 const pino = require('pino');
 const readline = require('readline');
@@ -417,5 +418,27 @@ async function main() {
 global.startSession = startSession;
 
 module.exports = { startSession };
+
+// ============================================================
+// 🌐 HTTP health-check server (required by Railway / Render)
+// ============================================================
+const PORT = process.env.PORT || 8080;
+http.createServer((req, res) => {
+  const activeSessions = Object.keys(global.activeSessions || {});
+  if (req.url === '/health' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: 'ok',
+      bot: 'LOYALTY MD',
+      sessions: activeSessions.length,
+      uptime: Math.floor(process.uptime()) + 's'
+    }));
+  } else {
+    res.writeHead(404);
+    res.end('Not found');
+  }
+}).listen(PORT, () => {
+  log.info(`🌐 Health server listening on port ${PORT}`);
+});
 
 main();
