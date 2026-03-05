@@ -30,10 +30,20 @@ const { connectDB, getAllSessions, saveSession, deleteSession: dbDeleteSession }
 
 // 🛡️ Prevent crashes from unhandled errors
 process.on('uncaughtException', (err) => {
-  console.error('[UNCAUGHT]', err.message);
+  if (err.message?.includes('Bad MAC') || err.message?.includes('Session error')) {
+    console.error('[SESSION ERROR]', err.message);
+    console.log('[INFO] Bot will continue running. Session may need to be recreated.');
+  } else {
+    console.error('[UNCAUGHT]', err.message);
+  }
 });
 process.on('unhandledRejection', (err) => {
-  console.error('[UNHANDLED]', err?.message || err);
+  if (err?.message?.includes('Bad MAC') || err?.message?.includes('Session error')) {
+    console.error('[SESSION ERROR]', err?.message || err);
+    console.log('[INFO] Bot will continue running. Session may need to be recreated.');
+  } else {
+    console.error('[UNHANDLED]', err?.message || err);
+  }
 });
 
 // 🌈 Console helpers
@@ -89,9 +99,17 @@ async function startSession(sessionId, isInitial = false) {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }).child({ level: 'silent' }))
     },
-    browser: Browsers.macOS('Chrome'),
+    browser: Browsers.ubuntu('Chrome'),
     markOnlineOnConnect: true,
-    generateHighQualityLinkPreview: false
+    generateHighQualityLinkPreview: false,
+    syncFullHistory: false,
+    getMessage: async (key) => {
+      if (store) {
+        const msg = await store.loadMessage(key.remoteJid, key.id);
+        return msg?.message || undefined;
+      }
+      return undefined;
+    }
   });
 
   // Bind the in-memory store to the socket for message retry (if available)
@@ -145,10 +163,23 @@ async function startSession(sessionId, isInitial = false) {
   };
 
   // Connection handling with auto-reconnect + exponential backoff
-  sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
+  sock.ev.on('connection.update', ({ connection, lastDisconnect, receivedPendingNotifications }) => {
     try {
+      // Log when pending notifications are received
+      if (receivedPendingNotifications) {
+        log.info(`Session "${sessionId}" received pending notifications`);
+      }
+
       if (connection === 'close') {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const errorMsg = lastDisconnect?.error?.message || '';
+
+        // Handle Bad MAC errors specifically
+        if (errorMsg.includes('Bad MAC')) {
+          log.error(`Session "${sessionId}" encountered Bad MAC error. Session may be corrupted.`);
+          log.warn(`Consider clearing session folder: sessions/${sessionId}`);
+        }
+
         const shouldReconnect = statusCode !== 401;
         log.error(`Session "${sessionId}" disconnected (code: ${statusCode}).`);
         // Remove from active sessions on disconnect
@@ -314,6 +345,12 @@ async function startSession(sessionId, isInitial = false) {
 
       await handleCommand(sock, m, command, isGroup, isAdmin, groupAdmins, isBotAdmin, groupMeta, config);
     } catch (err) {
+      // Handle specific session errors gracefully
+      if (err?.message?.includes('Bad MAC') || err?.message?.includes('Session error')) {
+        log.error(`Session error in message handler for "${sessionId}": ${err.message}`);
+        // Don't crash, just skip this message
+        return;
+      }
       console.error('Message handler error:', err);
     }
   });
