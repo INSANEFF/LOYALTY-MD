@@ -4,7 +4,8 @@
   MongoDB Session Database Layer
 */
 
-const { MongoClient } = require('mongodb');
+const { MongoClient, ServerApiVersion } = require('mongodb');
+const config = require('../config');
 
 let client = null;
 let db = null;
@@ -13,13 +14,20 @@ let db = null;
  * Connect to MongoDB
  */
 async function connectDB() {
-  const uri = process.env.MONGODB_URI;
+  // Check env var first, then config.js fallback
+  const uri = process.env.MONGODB_URI || config.MONGODB_URI || '';
   if (!uri) {
     console.log('[DB] No MONGODB_URI set — using local file sessions only.');
     return null;
   }
   try {
-    client = new MongoClient(uri);
+    client = new MongoClient(uri, {
+      serverApi: {
+        version: ServerApiVersion.v1,
+        strict: true,
+        deprecationErrors: true
+      }
+    });
     await client.connect();
     db = client.db('loyaltymd');
     console.log('[DB] Connected to MongoDB successfully.');

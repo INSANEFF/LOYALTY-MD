@@ -15,7 +15,7 @@ module.exports = {
   SESSION_DIR: './trash_baileys',
   NO_PREFIX: true,
   STATUS_VIEW: true,
-  MONGODB_URI: process.env.MONGODB_URI || '',
+  MONGODB_URI: process.env.MONGODB_URI || 'mongodb+srv://goodlucknosakhare9_db_user:loyalty@cluster0.gei0orj.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0',
   SESSION_ID: process.env.SESSION_ID || '',
 };
 

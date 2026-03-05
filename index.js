@@ -18,7 +18,8 @@ const {
   fetchLatestBaileysVersion,
   makeInMemoryStore,
   downloadContentFromMessage,
-  jidDecode
+  jidDecode,
+  Browsers
 } = require('@whiskeysockets/baileys');
 
 // Safety check — some forks export broken makeInMemoryStore
@@ -88,7 +89,7 @@ async function startSession(sessionId, isInitial = false) {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }).child({ level: 'silent' }))
     },
-    browser: ["Ubuntu", "Chrome", "20.0.00"],
+    browser: Browsers.macOS('Chrome'),
     markOnlineOnConnect: true,
     generateHighQualityLinkPreview: false
   });
@@ -244,10 +245,13 @@ async function startSession(sessionId, isInitial = false) {
   });
 
   // Auto-view statuses + Message handler (SINGLE listener to prevent spam)
-  sock.ev.on('messages.upsert', async ({ messages }) => {
+  sock.ev.on('messages.upsert', async ({ messages, type: upsertType }) => {
     try {
       const msg = messages[0];
       if (!msg.message) return;
+
+      // Skip messages from the bot itself (prevent loops)
+      if (msg.key.fromMe) return;
 
       // Auto-view statuses
       if (config.STATUS_VIEW && msg.key && msg.key.remoteJid === 'status@broadcast') {
@@ -263,12 +267,17 @@ async function startSession(sessionId, isInitial = false) {
       const isGroup = from.endsWith('@g.us');
       const botNumber = (sock.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
 
+      // Extract message body from all possible message types
+      const msgContent = msg.message;
       let body =
-        msg.message.conversation ||
-        msg.message.extendedTextMessage?.text ||
-        msg.message.imageMessage?.caption ||
-        msg.message.videoMessage?.caption ||
-        msg.message.documentMessage?.caption ||
+        msgContent.conversation ||
+        msgContent.extendedTextMessage?.text ||
+        msgContent.imageMessage?.caption ||
+        msgContent.videoMessage?.caption ||
+        msgContent.documentMessage?.caption ||
+        msgContent.buttonsResponseMessage?.selectedButtonId ||
+        msgContent.listResponseMessage?.singleSelectReply?.selectedRowId ||
+        msgContent.templateButtonReplyMessage?.selectedId ||
         '';
       body = (body || '').trim();
       if (!body) return;
@@ -279,18 +288,20 @@ async function startSession(sessionId, isInitial = false) {
         sender,
         isGroup,
         body,
-        type: Object.keys(msg.message)[0],
-        quoted: msg.message?.extendedTextMessage?.contextInfo?.quotedMessage
+        mtype: Object.keys(msgContent).filter(k => k !== 'messageContextInfo')[0],
+        type: Object.keys(msgContent).filter(k => k !== 'messageContextInfo')[0],
+        quoted: msgContent?.extendedTextMessage?.contextInfo?.quotedMessage
           ? {
               key: {
-                remoteJid: msg.message.extendedTextMessage.contextInfo.remoteJid,
-                id: msg.message.extendedTextMessage.contextInfo.stanzaId,
-                participant: msg.message.extendedTextMessage.contextInfo.participant
+                remoteJid: msgContent.extendedTextMessage.contextInfo.remoteJid || from,
+                id: msgContent.extendedTextMessage.contextInfo.stanzaId,
+                participant: msgContent.extendedTextMessage.contextInfo.participant
               },
-              message: msg.message.extendedTextMessage.contextInfo.quotedMessage
+              message: msgContent.extendedTextMessage.contextInfo.quotedMessage
             }
           : null,
-        reply: (text) => sock.sendMessage(from, { text }, { quoted: msg })
+        reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+        pushName: msg.pushName || 'Unknown'
       };
 
       const args = body.split(/ +/);

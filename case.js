@@ -46,9 +46,16 @@ function checkFFmpeg() {
     });
 }
 
-// ======= Dummy jidDecode for safety =======
+// ======= Safe JID decode helper =======
 function jidDecode(jid) {
-    const [user, server] = jid.split(':');
+    if (!jid) return null;
+    // Handle format like "1234:56@s.whatsapp.net"
+    const atIndex = jid.indexOf('@');
+    if (atIndex < 0) return null;
+    const userPart = jid.substring(0, atIndex);
+    const server = jid.substring(atIndex + 1);
+    // Strip the device suffix (e.g., "1234:56" -> "1234")
+    const user = userPart.split(':')[0];
     return { user, server };
 }
 
@@ -139,7 +146,7 @@ if (isGroup && global.antitag && global.antitag[from]?.enabled) {
     const groupAdmins = groupMeta.participants.filter(p => p.admin).map(p => p.id);
     const bNum = (trashcore.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
     const isBotAdmin = groupAdmins.includes(bNum);
-    const isSenderAdmin = groupAdmins.includes(m.sender);
+    const isSenderAdmin = groupAdmins.includes(sender);
 
     // Detect if message contains a mention
     const mentionedUsers = m.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
@@ -152,13 +159,13 @@ if (isGroup && global.antitag && global.antitag[from]?.enabled) {
 
                 // ⚠️ Notify group
                 await trashcore.sendMessage(from, {
-                    text: `🚫 *Yooh Tagging others is not allowed!*\nUser:Action: ${settings.mode.toUpperCase()}`,
-                    mentions: [m.sender],
+                    text: `🚫 *Tagging others is not allowed!*\nUser: @${sender.split('@')[0]}\nAction: ${settings.mode.toUpperCase()}`,
+                    mentions: [sender],
                 });
 
                 // 🚷 If mode is "kick"
                 if (settings.mode === "kick") {
-                    await trashcore.groupParticipantsUpdate(from, [m.sender], "remove");
+                    await trashcore.groupParticipantsUpdate(from, [sender], "remove");
                 }
             } catch (err) {
                 console.error("Anti-Tag Enforcement Error:", err);
@@ -170,7 +177,7 @@ if (isGroup && global.antitag && global.antitag[from]?.enabled) {
 // 🚫 AntiBadWord with Strike System
 if (isGroup && global.antibadword?.[from]?.enabled) {
   const badwords = global.antibadword[from].words || [];
-  const textMsg = (m.body || "").toLowerCase();
+  const textMsg = (body || "").toLowerCase();
   const found = badwords.find(w => textMsg.includes(w));
 
   if (found) {
@@ -178,36 +185,36 @@ if (isGroup && global.antibadword?.[from]?.enabled) {
     const groupMetadata = await trashcore.groupMetadata(from);
     const groupAdmins = groupMetadata.participants.filter(p => p.admin).map(p => p.id);
     const isBotAdmin = groupAdmins.includes(bNum);
-    const isSenderAdmin = groupAdmins.includes(m.sender);
+    const isSenderAdmin = groupAdmins.includes(sender);
 
     if (!isSenderAdmin) {
       if (isBotAdmin) {
         await trashcore.sendMessage(from, { delete: m.key });
       }
 
-      global.antibadword[from].warnings[m.sender] =
-        (global.antibadword[from].warnings[m.sender] || 0) + 1;
+      global.antibadword[from].warnings[sender] =
+        (global.antibadword[from].warnings[sender] || 0) + 1;
 
-      const warns = global.antibadword[from].warnings[m.sender];
+      const warns = global.antibadword[from].warnings[sender];
       const remaining = 3 - warns;
 
       if (warns < 3) {
         await trashcore.sendMessage(from, {
-          text: `⚠️ @${m.sender.split('@')[0]}, bad word detected!\nWord: *${found}*\nWarning: *${warns}/3*\n${remaining} more and you'll be kicked!`,
-          mentions: [m.sender],
+          text: `⚠️ @${sender.split('@')[0]}, bad word detected!\nWord: *${found}*\nWarning: *${warns}/3*\n${remaining} more and you'll be kicked!`,
+          mentions: [sender],
         });
       } else {
         if (isBotAdmin) {
           await trashcore.sendMessage(from, {
-            text: `🚫 @${m.sender.split('@')[0]} has been kicked for repeated bad words.`,
-            mentions: [m.sender],
+            text: `🚫 @${sender.split('@')[0]} has been kicked for repeated bad words.`,
+            mentions: [sender],
           });
-          await trashcore.groupParticipantsUpdate(from, [m.sender], "remove");
-          delete global.antibadword[from].warnings[m.sender];
+          await trashcore.groupParticipantsUpdate(from, [sender], "remove");
+          delete global.antibadword[from].warnings[sender];
         } else {
           await trashcore.sendMessage(from, {
-            text: `🚨 @${m.sender.split('@')[0]} reached 3 warnings, but I need admin rights to kick!`,
-            mentions: [m.sender],
+            text: `🚨 @${sender.split('@')[0]} reached 3 warnings, but I need admin rights to kick!`,
+            mentions: [sender],
           });
         }
       }
