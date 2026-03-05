@@ -4,7 +4,8 @@
   "description": "LOYALTY MD WhatsApp Bot using Baileys with switch(command) handler and media tools",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node start.js",
+    "dev": "node index.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "github:Tennor-modz/MD-Baileys",

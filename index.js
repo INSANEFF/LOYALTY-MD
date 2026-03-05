@@ -20,6 +20,9 @@ const {
   downloadContentFromMessage,
   jidDecode
 } = require('@whiskeysockets/baileys');
+
+// Safety check — some forks export broken makeInMemoryStore
+const HAS_STORE = typeof makeInMemoryStore === 'function';
 const handleCommand = require('./case');
 const config = require('./config');
 const { connectDB, getAllSessions, saveSession, deleteSession: dbDeleteSession } = require('./database/mongodb');
@@ -60,9 +63,14 @@ async function startSession(sessionId, isInitial = false) {
   const sessionDir = path.join(__dirname, 'sessions', sessionId);
   if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
 
-  const store = makeInMemoryStore({
-    logger: pino().child({ level: 'silent', stream: 'store' })
-  });
+  let store = null;
+  if (HAS_STORE) {
+    try {
+      store = makeInMemoryStore({ logger: pino().child({ level: 'silent', stream: 'store' }) });
+    } catch (err) {
+      log.warn(`Store init failed for "${sessionId}": ${err.message}`);
+    }
+  }
 
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
   const { version } = await fetchLatestBaileysVersion();
@@ -85,8 +93,12 @@ async function startSession(sessionId, isInitial = false) {
     generateHighQualityLinkPreview: false
   });
 
-  // Bind the in-memory store to the socket for message retry
-  store.bind(sock.ev);
+  // Bind the in-memory store to the socket for message retry (if available)
+  if (store) {
+    try { store.bind(sock.ev); } catch (err) {
+      log.warn(`Store bind failed for "${sessionId}": ${err.message}`);
+    }
+  }
 
   // Save creds to disk + MongoDB on every update
   sock.ev.on('creds.update', async () => {
@@ -101,8 +113,14 @@ async function startSession(sessionId, isInitial = false) {
   // Pairing code (only for initial session if not yet registered)
   if (!sock.authState.creds.registered) {
     if (isInitial) {
-      const phoneNumber = await question(chalk.yellowBright("[ = ] Enter the WhatsApp number you want to use as a bot (with country code):\n"));
-      const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+      // Use PHONE_NUMBER from config.js if set, otherwise prompt
+      let cleanNumber = (config.PHONE_NUMBER || '').replace(/[^0-9]/g, '');
+      if (!cleanNumber) {
+        const phoneNumber = await question(chalk.yellowBright("[ = ] Enter the WhatsApp number you want to use as a bot (with country code):\n"));
+        cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+      } else {
+        log.info(`Using phone number from config: ${chalk.green(cleanNumber)}`);
+      }
       console.clear();
       const pairCode = await sock.requestPairingCode(cleanNumber);
       log.info(`Enter this code on your phone to pair: ${chalk.green(pairCode)}`);
