@@ -92,3 +92,54 @@ npm start
 ```bash
 npm i -g pm2 && pm2 start index.js && pm2 save && pm2 logs
 ```
+
+---
+
+## Troubleshooting
+
+### "Bad MAC" Error / Session Errors
+
+If you encounter `Bad MAC` errors or session errors like:
+```
+Session error:Error: Bad MAC
+at Object.verifyMAC (/home/container/node_modules/libsignal/src/crypto.js:87:15)
+```
+
+**This means your WhatsApp session has become corrupted or desynchronized.** Here are the solutions:
+
+#### Option 1: Clear Session and Re-pair (Recommended)
+```bash
+# Stop the bot
+pm2 stop index.js  # if using pm2
+# or press Ctrl+C if running directly
+
+# Remove the corrupted session
+rm -rf sessions/main
+
+# Restart the bot - it will ask for pairing code again
+npm start
+```
+
+#### Option 2: Generate New SESSION_ID
+If using SESSION_ID environment variable:
+1. Visit your pairing service and generate a new session
+2. Update your `SESSION_ID` environment variable
+3. Clear the old session folder: `rm -rf sessions/main`
+4. Restart the bot
+
+#### Option 3: Logout from WhatsApp and Re-login
+1. Open WhatsApp on your phone
+2. Go to **Linked Devices**
+3. Find your bot session and **Logout**
+4. Clear the session folder: `rm -rf sessions/main`
+5. Restart the bot and pair again
+
+#### Prevention Tips
+- Don't use the same WhatsApp number on multiple bots simultaneously
+- Avoid force-killing the bot process (use proper shutdown)
+- Keep your Baileys library updated
+- Use stable hosting with consistent uptime
+
+**Note:** The bot now includes automatic error recovery. It will try to continue running even with session errors, but may need a fresh session to respond properly.
+
+---
