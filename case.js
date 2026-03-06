@@ -214,8 +214,8 @@ if (!trashcore.isPublic && !isOwner && !isSudo) {
             // ================= PING =================
             case 'ping':
             case 'alive': {
-                const latency = Date.now() - (m.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
-                reply(`Pong!\n Latency: ${Math.abs(latency)}ms\nUptime: ${formatUptime(process.uptime())}\n Owner: LOYALTY MD`);
+                const start = Date.now();
+                await reply(`🏓 Pong!\nSpeed: ${Date.now() - start}ms\nUptime: ${formatUptime(process.uptime())}\nOwner: LOYALTY MD`);
                 break;
             }
 

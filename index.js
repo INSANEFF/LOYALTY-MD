@@ -64,7 +64,7 @@ console.info = function (...args) {
 const _origConsoleWarn = console.warn;
 console.warn = function (...args) {
   const first = String(args[0] || '');
-  if (first.includes('Decrypted message with')) return;
+  if (first.includes('Decrypted message with') || first.includes('Session already') || first.includes('Closing open session') || first.includes('Unhandled bucket') || first.includes('printQRInTerminal')) return;
   _origConsoleWarn.apply(console, args);
 };
 
@@ -303,6 +303,14 @@ async function startSession(sessionId, isInitial = false) {
         if (msg.key.fromMe) continue;
         // Skip internal Baileys protocol messages (BAE5)
         if (msg.key.id?.startsWith('BAE5') && msg.key.id.length === 16) continue;
+
+        // Skip stale messages (older than 60s) — prevents processing offline backlog on reconnect
+        const msgTs = msg.messageTimestamp;
+        if (msgTs && (typeof msgTs === 'number' || typeof msgTs === 'object') ) {
+          const tsSeconds = typeof msgTs === 'object' ? Number(msgTs.low || msgTs) : msgTs;
+          const ageMs = Date.now() - tsSeconds * 1000;
+          if (ageMs > 60000) continue;
+        }
 
         // Auto-view statuses
         if (config.STATUS_VIEW && msg.key.remoteJid === 'status@broadcast') {
