@@ -311,9 +311,6 @@ async function startSession(sessionId, isInitial = false) {
           const _bodyPeek = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
           if (!/^[.!/#+><=]/.test(_bodyPeek)) continue;
         }
-        // Skip internal Baileys protocol messages (BAE5)
-        if (msg.key.id?.startsWith('BAE5') && msg.key.id.length === 16) continue;
-
         // Auto-view statuses
         if (config.STATUS_VIEW && msg.key.remoteJid === 'status@broadcast') {
           try { await sock.readMessages([msg.key]); } catch (_) {}
