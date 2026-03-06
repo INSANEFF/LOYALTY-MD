@@ -4,7 +4,7 @@ module.exports = {
   //    or edit the defaults below for local testing
   // ============================================================
   BOT_NAME: process.env.BOT_NAME || 'LOYALTY MD',
-  OWNER_NAME: process.env.OWNER_NAME || 'LOYALTY MD',
+  OWNER_NAME: process.env.OWNER_NAME || 'LOYALTY',
   OWNER_NUMBER: process.env.OWNER_NUMBER || '',
 
   // 📱 PHONE_NUMBER — The WhatsApp number to connect as the bot

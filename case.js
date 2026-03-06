@@ -286,7 +286,22 @@ if (!trashcore.isPublic && !isOwner && !isSudo) {
 • >
 • <
 • =>`;
+
+                const menuImagePath = path.join(__dirname, 'media', 'menu.jpg');
+                const menuImageUrl = process.env.MENU_IMAGE_URL || '';
                 try {
+                    if (menuImageUrl) {
+                        await trashcore.sendMessage(from, {
+                            image: { url: menuImageUrl },
+                            caption: stylishReply(menuText)
+                        }, { quoted: m });
+                    } else if (fs.existsSync(menuImagePath)) {
+                        await trashcore.sendMessage(from, {
+                            image: fs.readFileSync(menuImagePath),
+                            caption: stylishReply(menuText)
+                        }, { quoted: m });
+                    }
+
                     await sendButtons(trashcore, from, {
                         text: stylishReply(menuText),
                         footer: `🖥️ Powered by ${config.BOT_NAME}`,
