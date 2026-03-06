@@ -395,13 +395,25 @@ async function startSession(sessionId, isInitial = false) {
           pushName: msg.pushName || 'Unknown'
         };
 
-        let command = body.split(/ +/)[0].toLowerCase();
-        // Strip common prefixes (. ! / #) so ".ping" matches "ping"
-        const stripped = command.replace(/^[.!/#+]+/, '');
-        if (stripped) command = stripped;
+        const rawToken = body.split(/ +/)[0].toLowerCase();
+        const hasPrefix = /^[.!/#+><=]/.test(rawToken);
+        let command = rawToken.replace(/^[.!/#+><=]+/, '');
+        if (!command) continue;
 
-        // Always forward text to handleCommand for reliability.
-        // Non-command chatter exits quickly in case.js switch/default.
+        const interactiveTriggered = !!(
+          msgContent.buttonsResponseMessage?.selectedButtonId ||
+          msgContent.listResponseMessage?.singleSelectReply?.selectedRowId ||
+          msgContent.templateButtonReplyMessage?.selectedId ||
+          msgContent.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson
+        );
+
+        const isKnownCmd = KNOWN_COMMANDS.has(command);
+        const hasAntiFeatures = isGroup && (global.antilink?.[from]?.enabled || global.antitag?.[from]?.enabled || global.antibadword?.[from]?.enabled);
+        const allowNoPrefixDm = config.NO_PREFIX && !isGroup && isKnownCmd;
+
+        // Process only real commands to avoid CPU spikes from normal group chat.
+        if (!hasPrefix && !interactiveTriggered && !allowNoPrefixDm && !hasAntiFeatures) continue;
+        if (!isKnownCmd && !hasAntiFeatures) continue;
 
         // Use cached group metadata — no network call
         const groupMeta = isGroup ? await getCachedGroupMeta(sock, from) : null;

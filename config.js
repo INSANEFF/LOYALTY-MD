@@ -14,7 +14,7 @@ module.exports = {
 
   // ⚙️ BOT SETTINGS
   PREFIX: process.env.PREFIX || '',
-  NO_PREFIX: (process.env.NO_PREFIX || 'true').toLowerCase() === 'true',
+  NO_PREFIX: (process.env.NO_PREFIX || 'false').toLowerCase() === 'true',
   STATUS_VIEW: (process.env.STATUS_VIEW || 'true').toLowerCase() === 'true',
 
   // 🗄️ DATABASE & SESSION
