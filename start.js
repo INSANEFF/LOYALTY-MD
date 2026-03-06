@@ -29,15 +29,42 @@ function run(cmd, label) {
 // 1️⃣  Git Pull — sync latest code from remote
 // ============================================================
 console.log('\n🔄 Syncing latest code from GitHub...');
-const pullResult = run('git pull', 'Git pull');
 
-if (pullResult !== null) {
-  if (pullResult.includes('Already up to date') || pullResult.includes('Already up-to-date')) {
-    console.log('✅ Already up to date.');
+// Ensure git is available
+const gitCheck = run('git --version', 'Git check');
+if (gitCheck) {
+  // Stash any local changes (like data files) to prevent pull conflicts
+  run('git stash', 'Git stash');
+  
+  // Fetch and reset to remote to ensure clean sync
+  const fetchResult = run('git fetch origin', 'Git fetch');
+  
+  // Get current branch name
+  const branch = run('git rev-parse --abbrev-ref HEAD', 'Git branch') || 'master';
+  
+  // Pull latest changes
+  const pullResult = run(`git pull origin ${branch} --rebase`, 'Git pull');
+
+  if (pullResult !== null) {
+    if (pullResult.includes('Already up to date') || pullResult.includes('Already up-to-date')) {
+      console.log('✅ Already up to date.');
+    } else {
+      console.log('📥 Updates pulled:');
+      console.log(pullResult);
+    }
   } else {
-    console.log('📥 Updates pulled:');
-    console.log(pullResult);
+    // If pull failed, try hard reset to remote
+    console.log('⚠️ Pull failed, attempting hard reset to remote...');
+    const resetResult = run(`git reset --hard origin/${branch}`, 'Git reset');
+    if (resetResult) {
+      console.log('✅ Reset to latest remote code.');
+    }
   }
+  
+  // Re-apply stashed changes (won't fail if nothing was stashed)
+  run('git stash pop', 'Git stash pop');
+} else {
+  console.log('⚠️ Git not available. Skipping code sync.');
 }
 
 // ============================================================

@@ -90,7 +90,7 @@ const isSudo = isOwner || getSudo().includes(senderNumber);
     const quotedSender = trashcore.decodeJid(ctx.participant || from);
     const mentioned = ctx.mentionedJid?.map(trashcore.decodeJid) || [];
 
-    const body = m.message.conversation || m.message.extendedTextMessage?.text || '';
+    const body = m.body || m.message.conversation || m.message.extendedTextMessage?.text || '';
     const args = body.trim().split(/ +/).slice(1);
     const text = args.join(" ");
 
@@ -1528,7 +1528,7 @@ case 'add': {
                     { quoted: m }
                 ).catch((err) => reply('❌ Failed to send invitation! 😔'));
             } else {
-                reply(mess.success);
+                reply('✅ User added successfully!');
             }
         }
     } catch (e) {
@@ -1651,8 +1651,8 @@ case 'promote': {
 
         // Get target user (from mention or quoted)
         let target;
-        if (m.message.extendedTextMessage?.contextInfo?.mentionedJid?.length) {
-            target = m.message.extendedTextMessage.contextInfo.mentionedJid[0];
+        if (m.mentionedJid?.length) {
+            target = m.mentionedJid[0];
         } else if (m.quoted && m.quoted.key.participant) {
             target = m.quoted.key.participant;
         } else {
@@ -1702,8 +1702,8 @@ case 'demote': {
 
         // Get target (mention or reply)
         let target;
-        if (m.message.extendedTextMessage?.contextInfo?.mentionedJid?.length) {
-            target = m.message.extendedTextMessage.contextInfo.mentionedJid[0];
+        if (m.mentionedJid?.length) {
+            target = m.mentionedJid[0];
         } else if (m.quoted && m.quoted.sender) {
             target = m.quoted.sender;
         } else {
@@ -1793,14 +1793,4 @@ case 'copilot': {
 };
 
 // =============== HOT RELOAD ===============
-let file = require.resolve(__filename);
-fs.watchFile(file, () => {
-    fs.unwatchFile(file);
-    console.log(`${colors.bgGreen}${colors.white}♻️ Update detected on ${__filename}${colors.reset}`);
-    delete require.cache[file];
-    try { 
-        require(file); 
-    } catch (err) {
-        console.error(`${colors.bgGreen}${colors.yellow}❌ Error reloading case.js:${colors.reset}`, err);
-    }
-});
+// Note: hot-reload is managed by index.js, not needed here

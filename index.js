@@ -19,7 +19,8 @@ const {
   makeInMemoryStore,
   downloadContentFromMessage,
   jidDecode,
-  Browsers
+  Browsers,
+  DisconnectReason
 } = require('@whiskeysockets/baileys');
 
 // Safety check — some forks export broken makeInMemoryStore
@@ -74,15 +75,24 @@ async function startSession(sessionId, isInitial = false) {
   }
 
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-  const { version } = await fetchLatestBaileysVersion();
+
+  let version;
+  try {
+    const fetched = await fetchLatestBaileysVersion();
+    version = fetched.version;
+  } catch (err) {
+    log.warn(`Could not fetch latest Baileys version: ${err.message}. Using fallback.`);
+    version = [2, 3000, 1015901307];
+  }
 
   const sock = makeWASocket({
     version,
-    keepAliveIntervalMs: 25000,
+    keepAliveIntervalMs: 30000,
     retryRequestDelayMs: 2000,
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     emitOwnEvents: true,
+    fireInitQueries: true,
     printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
     auth: {
@@ -91,7 +101,12 @@ async function startSession(sessionId, isInitial = false) {
     },
     browser: Browsers.macOS('Chrome'),
     markOnlineOnConnect: true,
-    generateHighQualityLinkPreview: false
+    generateHighQualityLinkPreview: false,
+    syncFullHistory: false,
+    getMessage: async (key) => {
+      // Required for message retries — return empty if not found
+      return { conversation: '' };
+    }
   });
 
   // Bind the in-memory store to the socket for message retry (if available)
@@ -147,10 +162,13 @@ async function startSession(sessionId, isInitial = false) {
   // Connection handling with auto-reconnect + exponential backoff
   sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
     try {
-      if (connection === 'close') {
+      if (connection === 'connecting') {
+        log.info(`Session "${sessionId}" connecting...`);
+      } else if (connection === 'close') {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
-        const shouldReconnect = statusCode !== 401;
-        log.error(`Session "${sessionId}" disconnected (code: ${statusCode}).`);
+        const reason = lastDisconnect?.error?.message || 'unknown';
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut && statusCode !== 401;
+        log.error(`Session "${sessionId}" disconnected (code: ${statusCode}, reason: ${reason}).`);
         // Remove from active sessions on disconnect
         delete global.activeSessions[sessionId];
         if (shouldReconnect) {
@@ -282,22 +300,32 @@ async function startSession(sessionId, isInitial = false) {
       body = (body || '').trim();
       if (!body) return;
 
+      // Extract contextInfo and mentionedJid from any message type that has them
+      const contextInfo = msgContent?.extendedTextMessage?.contextInfo
+        || msgContent?.imageMessage?.contextInfo
+        || msgContent?.videoMessage?.contextInfo
+        || msgContent?.documentMessage?.contextInfo
+        || {};
+
       const m = {
         ...msg,
         chat: from,
         sender,
         isGroup,
         body,
+        mentionedJid: contextInfo.mentionedJid || [],
         mtype: Object.keys(msgContent).filter(k => k !== 'messageContextInfo')[0],
         type: Object.keys(msgContent).filter(k => k !== 'messageContextInfo')[0],
-        quoted: msgContent?.extendedTextMessage?.contextInfo?.quotedMessage
+        quoted: contextInfo.quotedMessage
           ? {
               key: {
-                remoteJid: msgContent.extendedTextMessage.contextInfo.remoteJid || from,
-                id: msgContent.extendedTextMessage.contextInfo.stanzaId,
-                participant: msgContent.extendedTextMessage.contextInfo.participant
+                remoteJid: contextInfo.remoteJid || from,
+                id: contextInfo.stanzaId,
+                participant: contextInfo.participant
               },
-              message: msgContent.extendedTextMessage.contextInfo.quotedMessage
+              message: contextInfo.quotedMessage,
+              sender: contextInfo.participant || from,
+              msg: contextInfo.quotedMessage[Object.keys(contextInfo.quotedMessage).filter(k => k !== 'messageContextInfo')[0]]
             }
           : null,
         reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
@@ -391,9 +419,9 @@ async function main() {
     if (!fs.existsSync(sessDir)) {
       fs.mkdirSync(sessDir, { recursive: true });
       // Restore creds from DB
-      if (dbSess.creds) {
+      if (dbSess.authState) {
         try {
-          fs.writeFileSync(path.join(sessDir, 'creds.json'), dbSess.creds);
+          fs.writeFileSync(path.join(sessDir, 'creds.json'), dbSess.authState);
           log.info(`Restored session "${dbSess.sessionId}" from database.`);
         } catch (_) {}
       }
