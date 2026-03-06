@@ -293,24 +293,23 @@ async function startSession(sessionId, isInitial = false) {
   });
 
   // ---- Messages handler ----
+  const sessionStartSec = Math.floor(Date.now() / 1000);
   sock.ev.on('messages.upsert', async (chatUpdate) => {
     const { messages, type: upsertType } = chatUpdate;
     // baileys v7 sends 'append' for real-time messages; v6 used 'notify'
     if (upsertType !== 'notify' && upsertType !== 'append') return;
     try {
       // Keep processing responsive under heavy backlog bursts.
-      const recentBatch = messages.length > 30 ? messages.slice(-30) : messages;
-      for (const msg of recentBatch.reverse()) {
+      const recentBatch = messages.length > 40 ? messages.slice(-40) : messages;
+      for (const msg of [...recentBatch].reverse()) {
         if (!msg.message) continue;
 
-        // In v7, 'append' may include offline backlog. Drop stale items fast.
+        // In v7, 'append' may include offline backlog on reconnect.
+        // Drop items older than this runtime start to keep command latency low.
         if (upsertType === 'append') {
           const tsRaw = msg.messageTimestamp;
           const tsSeconds = tsRaw ? (typeof tsRaw === 'object' ? Number(tsRaw.low || tsRaw) : Number(tsRaw)) : 0;
-          if (tsSeconds > 0) {
-            const ageSeconds = Math.floor(Date.now() / 1000) - tsSeconds;
-            if (ageSeconds > 120 && !msg.key.fromMe) continue;
-          }
+          if (tsSeconds > 0 && tsSeconds < (sessionStartSec - 15) && !msg.key.fromMe) continue;
         }
 
         // Allow fromMe if it starts with a command prefix — owner can use bot from same phone
