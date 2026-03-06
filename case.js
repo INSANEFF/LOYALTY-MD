@@ -1,6 +1,6 @@
 /*
-📝 | LOYALTY MD Bot
-🖥️ | Powered by LOYALTY MD
+📝 | LOYALTY MD Bot v4.0
+🖥️ | Powered by gifted-baileys + gifted-btns
 */
 
 const fs = require('fs');
@@ -16,6 +16,7 @@ const chalk = require('chalk');
 const { writeFile } = require('./library/utils');
 const config = require('./config');
 const { getOwners, addOwner, removeOwner, getSudo, addSudo, removeSudo } = require('./database/store');
+const { sendButtons } = require('gifted-btns');
 
 // =============== COLORS ===============
 const colors = {
@@ -62,14 +63,16 @@ function jidDecode(jid) {
 // =============== MAIN FUNCTION ===============
 module.exports = async function handleCommand(trashcore, m, command, isGroup, isAdmin, groupAdmins,isBotAdmins,groupMeta,config) {
 
-    // ======= Safe JID decoding =======
-    trashcore.decodeJid = (jid) => {
-        if (!jid) return jid;
-        if (/:\d+@/gi.test(jid)) {
-            let decode = jidDecode(jid) || {};
-            return decode.user && decode.server ? `${decode.user}@${decode.server}` : jid;
-        } else return jid;
-    };
+    // ======= Safe JID decoding (set once) =======
+    if (!trashcore.decodeJid) {
+        trashcore.decodeJid = (jid) => {
+            if (!jid) return jid;
+            if (/:\d+@/gi.test(jid)) {
+                let decode = jidDecode(jid) || {};
+                return decode.user && decode.server ? `${decode.user}@${decode.server}` : jid;
+            } else return jid;
+        };
+    }
     const from = trashcore.decodeJid(m.key.remoteJid);
     const sender = m.key.participant || m.key.remoteJid;
     const participant = trashcore.decodeJid(m.key.participant || from);
@@ -95,19 +98,7 @@ const isSudo = isOwner || getSudo().includes(senderNumber);
     const text = args.join(" ");
 
     const time = new Date().toLocaleTimeString();
-    
-
-console.log(
-  chalk.bgHex('#8B4513').white.bold(`
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📥 INCOMING MESSAGE (${time})
-👤 From: ${pushname} (${participant})
-💬 Chat Type: ${chatType} - ${chatName}
-🏷️ Command: ${command || "—"}
-💭 Message: ${body || "—"}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-`)
-);
+    console.log(`[${time}] ${pushname} | ${chatName} | cmd:${command || '-'} | ${body.substring(0, 40)}`);
 // --- 🚨 ANTILINK 2.0 AUTO CHECK ---
 if (isGroup && global.antilink && global.antilink[from]?.enabled) {
     const linkPattern = /(https?:\/\/[^\s]+)/gi;
@@ -115,13 +106,12 @@ if (isGroup && global.antilink && global.antilink[from]?.enabled) {
 
     if (linkPattern.test(bodyText)) {
         const settings = global.antilink[from];
-        const groupMeta = await trashcore.groupMetadata(from);
-        const groupAdmins = groupMeta.participants.filter(p => p.admin).map(p => p.id);
-        const bNum = (trashcore.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
-        const isBotAdmin = groupAdmins.includes(bNum);
-        const isSenderAdmin = groupAdmins.includes(sender);
+        const _gAdmins = groupMeta ? groupMeta.participants.filter(p => p.admin).map(p => p.id) : [];
+        const _bNum = (trashcore.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
+        const _isBotAdmin = _gAdmins.includes(_bNum);
+        const _isSenderAdmin = _gAdmins.includes(sender);
 
-        if (!isSenderAdmin && isBotAdmin) {
+        if (!_isSenderAdmin && _isBotAdmin) {
             try {
                 await trashcore.sendMessage(from, { delete: m.key });
                 await trashcore.sendMessage(from, {
@@ -142,28 +132,22 @@ if (isGroup && global.antilink && global.antilink[from]?.enabled) {
 // --- 🚫 ANTI-TAG AUTO CHECK ---
 if (isGroup && global.antitag && global.antitag[from]?.enabled) {
     const settings = global.antitag[from];
-    const groupMeta = await trashcore.groupMetadata(from);
-    const groupAdmins = groupMeta.participants.filter(p => p.admin).map(p => p.id);
-    const bNum = (trashcore.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
-    const isBotAdmin = groupAdmins.includes(bNum);
-    const isSenderAdmin = groupAdmins.includes(sender);
+    const _tgAdmins = groupMeta ? groupMeta.participants.filter(p => p.admin).map(p => p.id) : [];
+    const _tBNum = (trashcore.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
+    const _tIsBotAdmin = _tgAdmins.includes(_tBNum);
+    const _tIsSenderAdmin = _tgAdmins.includes(sender);
 
     // Detect if message contains a mention
     const mentionedUsers = m.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
 
     if (mentionedUsers.length > 0) {
-        if (!isSenderAdmin && isBotAdmin) {
+        if (!_tIsSenderAdmin && _tIsBotAdmin) {
             try {
-                // 🧹 Delete message
                 await trashcore.sendMessage(from, { delete: m.key });
-
-                // ⚠️ Notify group
                 await trashcore.sendMessage(from, {
                     text: `🚫 *Tagging others is not allowed!*\nUser: @${sender.split('@')[0]}\nAction: ${settings.mode.toUpperCase()}`,
                     mentions: [sender],
                 });
-
-                // 🚷 If mode is "kick"
                 if (settings.mode === "kick") {
                     await trashcore.groupParticipantsUpdate(from, [sender], "remove");
                 }
@@ -182,10 +166,9 @@ if (isGroup && global.antibadword?.[from]?.enabled) {
 
   if (found) {
     const bNum = (trashcore.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
-    const groupMetadata = await trashcore.groupMetadata(from);
-    const groupAdmins = groupMetadata.participants.filter(p => p.admin).map(p => p.id);
-    const isBotAdmin = groupAdmins.includes(bNum);
-    const isSenderAdmin = groupAdmins.includes(sender);
+    const _bwAdmins = groupMeta ? groupMeta.participants.filter(p => p.admin).map(p => p.id) : [];
+    const isBotAdmin = _bwAdmins.includes(bNum);
+    const isSenderAdmin = _bwAdmins.includes(sender);
 
     if (!isSenderAdmin) {
       if (isBotAdmin) {
@@ -230,9 +213,8 @@ if (!trashcore.isPublic && !isOwner && !isSudo) {
             // ================= PING =================
             case 'ping':
             case 'alive': {
-                const start = Date.now();
-                const latency = Date.now() - start;
-                await reply(`Pong!\n Latency: ${latency}ms\nUptime: ${formatUptime(process.uptime())}\n Owner: LOYALTY MD`);
+                const latency = Date.now() - (m.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
+                reply(`Pong!\n Latency: ${Math.abs(latency)}ms\nUptime: ${formatUptime(process.uptime())}\n Owner: LOYALTY MD`);
                 break;
             }
 
@@ -241,8 +223,8 @@ if (!trashcore.isPublic && !isOwner && !isSudo) {
             case 'help': {
                 const menuText = `👑 Creator: LOYALTY MD
 📝 Type: Base Script
-⚡ Version: 3.0.0
-📦 Module: Case
+⚡ Version: 4.0.0
+📦 Engine: gifted-baileys
 
 |COMMANDS|
 
@@ -303,15 +285,17 @@ if (!trashcore.isPublic && !isOwner && !isSudo) {
 • >
 • <
 • =>`;
-                const videoPath = './media/menu.mp4';
                 try {
-                    await trashcore.sendMessage(from, {
-                        video: { url: videoPath },
-                        caption: stylishReply(menuText),
-                        gifPlayback: true
-                    }, { quoted: m });
-                } catch (err) {
-                    console.error('Menu video failed:', err);
+                    await sendButtons(trashcore, from, {
+                        text: stylishReply(menuText),
+                        footer: '🖥️ Powered by gifted-baileys',
+                        buttons: [
+                            { id: 'ping', text: '🏓 Ping' },
+                            { id: 'weather', text: '🌤️ Weather' },
+                            { id: 'play', text: '🎵 Play Music' }
+                        ]
+                    });
+                } catch (btnErr) {
                     await reply(menuText);
                 }
                 break;
@@ -1544,8 +1528,8 @@ case 'hidetag': {
     if (!args || args.length === 0) return reply('❌ Please provide a message to hidetag!');
 
     try {
-        const groupMeta = await trashcore.groupMetadata(from);
-        const participants = groupMeta.participants.map(p => p.id);
+        const _htMeta = groupMeta;
+        const participants = _htMeta ? _htMeta.participants.map(p => p.id) : [];
 
         const text = args.join(' ');
         await trashcore.sendMessage(from, { text, mentions: participants });
@@ -1562,17 +1546,16 @@ case 'everyone':
         return await trashcore.sendMessage(from, { text: '❌ This command can only be used in groups!' });
     }
 
-    const groupMeta = await trashcore.groupMetadata(from);
-    const participants = groupMeta.participants.map(p => p.id);
+    const _taParticipants = groupMeta ? groupMeta.participants.map(p => p.id) : [];
 
     let messageText = `👥 Tagging everyone in the group!\n\n`;
-    participants.forEach((p, i) => {
+    _taParticipants.forEach((p, i) => {
         messageText += `• @${p.split('@')[0]}\n`;
     });
 
     await trashcore.sendMessage(from, {
         text: messageText,
-        mentions: participants
+        mentions: _taParticipants
     });
 break;
 
@@ -1634,8 +1617,8 @@ case 'promote': {
     try {
         if (!m.isGroup) return m.reply("❌ This command only works in groups!");
 
-        const groupMetadata = await trashcore.groupMetadata(m.chat);
-        const participants = groupMetadata.participants;
+        const _promMeta = groupMeta || {};
+        const participants = _promMeta.participants || [];
 
         // Extract all admins (numbers only for reliability)
         const groupAdmins = participants
@@ -1683,8 +1666,8 @@ case 'demote': {
     try {
         if (!m.isGroup) return reply("❌ This command only works in groups!");
 
-        const groupMetadata = await trashcore.groupMetadata(m.chat);
-        const participants = groupMetadata.participants;
+        const _demMeta = groupMeta || {};
+        const participants = _demMeta.participants || [];
 
         // Extract admin JIDs (keep full IDs)
         const groupAdmins = participants

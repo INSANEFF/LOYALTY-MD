@@ -1,7 +1,6 @@
 /*
-📝 | LOYALTY MD Bot
-🖥️ | Powered by LOYALTY MD
-  Multi-Session WhatsApp Bot
+📝 | LOYALTY MD Bot v4.0
+🖥️ | Powered by @whiskeysockets/baileys + gifted-btns
 */
 
 const http = require('http');
@@ -11,31 +10,75 @@ const readline = require('readline');
 const path = require('path');
 const chalk = require('chalk');
 const { exec } = require('child_process');
+const NodeCache = require('node-cache');
+
 const {
   default: makeWASocket,
   useMultiFileAuthState,
   makeCacheableSignalKeyStore,
   fetchLatestBaileysVersion,
-  makeInMemoryStore,
   downloadContentFromMessage,
   jidDecode,
   Browsers,
-  DisconnectReason
+  DisconnectReason,
+  delay
 } = require('@whiskeysockets/baileys');
 
-// Safety check — some forks export broken makeInMemoryStore
-const HAS_STORE = typeof makeInMemoryStore === 'function';
+// Message retry counter cache — prevents retry storms (MEGA-MD pattern)
+const msgRetryCounterCache = new NodeCache();
+
+const { sendButtons } = require('gifted-btns');
+
 const handleCommand = require('./case');
 const config = require('./config');
 const { connectDB, getAllSessions, saveSession, deleteSession: dbDeleteSession } = require('./database/mongodb');
 
-// 🛡️ Prevent crashes from unhandled errors
+// 🛡️ Prevent crashes
 process.on('uncaughtException', (err) => {
-  console.error('[UNCAUGHT]', err.message);
+  const msg = String(err);
+  const ignore = ['conflict', 'not-authorized', 'Socket connection timeout', 'rate-overlimit',
+    'Connection Closed', 'Timed Out', 'Value not found', 'Stream Errored', 'restart required',
+    'Bad MAC', 'Failed to decrypt', 'decryption-error'];
+  if (!ignore.some(x => msg.includes(x))) console.error('[UNCAUGHT]', err.message);
 });
 process.on('unhandledRejection', (err) => {
-  console.error('[UNHANDLED]', err?.message || err);
+  const msg = String(err?.message || err);
+  const ignore = ['Bad MAC', 'Failed to decrypt', 'decryption-error'];
+  if (!ignore.some(x => msg.includes(x))) console.error('[UNHANDLED]', msg);
 });
+
+// Suppress libsignal Bad MAC / decrypt error spam from flooding console
+const _origConsoleError = console.error;
+console.error = function (...args) {
+  const first = String(args[0] || '');
+  if (first.includes('Bad MAC') || first.includes('Failed to decrypt') || first.includes('Session error') || first.includes('decryption-error')) return;
+  _origConsoleError.apply(console, args);
+};
+
+// Group metadata cache (5 min TTL) to avoid network calls on every message
+const _groupMetaCache = new Map();
+const GROUP_META_TTL = 5 * 60 * 1000;
+function getCachedGroupMeta(sock, jid) {
+  const cached = _groupMetaCache.get(jid);
+  if (cached && Date.now() - cached.ts < GROUP_META_TTL) return Promise.resolve(cached.data);
+  return sock.groupMetadata(jid).then(meta => {
+    _groupMetaCache.set(jid, { data: meta, ts: Date.now() });
+    return meta;
+  }).catch(() => null);
+}
+
+// Known bot commands — skip handleCommand for non-matching messages (NO_PREFIX mode)
+const KNOWN_COMMANDS = new Set([
+  'ping','alive','menu','help','weather','checktime','time','gitclone','save',
+  'fb','facebook','fbdl','ig','instagram','igdl','tiktok','tt','play','music',
+  'video','toaudio','tovoicenote','toimage','private','self','public',
+  'addsession','delsession','sessions','listsessions','addbot','delbot',
+  'addowner','delowner','removeowner','listowners','owners',
+  'sudo','addsudo','delsudo','removesudo','listsudo','playdoc',
+  'antilink','antitag','antidemote','antipromote','antibadword',
+  'add','hidetag','tagall','everyone','kick','remove','promote','demote','copilot',
+  '>','<','=>'
+]);
 
 // 🌈 Console helpers
 const log = {
@@ -65,15 +108,6 @@ async function startSession(sessionId, isInitial = false) {
   const sessionDir = path.join(__dirname, 'sessions', sessionId);
   if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
 
-  let store = null;
-  if (HAS_STORE) {
-    try {
-      store = makeInMemoryStore({ logger: pino().child({ level: 'silent', stream: 'store' }) });
-    } catch (err) {
-      log.warn(`Store init failed for "${sessionId}": ${err.message}`);
-    }
-  }
-
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
 
   let version;
@@ -87,8 +121,8 @@ async function startSession(sessionId, isInitial = false) {
 
   const sock = makeWASocket({
     version,
-    keepAliveIntervalMs: 30000,
-    retryRequestDelayMs: 2000,
+    keepAliveIntervalMs: 10000,
+    retryRequestDelayMs: 1500,
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     emitOwnEvents: true,
@@ -100,23 +134,16 @@ async function startSession(sessionId, isInitial = false) {
       keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }).child({ level: 'silent' }))
     },
     browser: Browsers.macOS('Chrome'),
-    markOnlineOnConnect: true,
+    markOnlineOnConnect: false,
     generateHighQualityLinkPreview: false,
     syncFullHistory: false,
+    msgRetryCounterCache,
     getMessage: async (key) => {
-      // Required for message retries — return empty if not found
       return { conversation: '' };
     }
   });
 
-  // Bind the in-memory store to the socket for message retry (if available)
-  if (store) {
-    try { store.bind(sock.ev); } catch (err) {
-      log.warn(`Store bind failed for "${sessionId}": ${err.message}`);
-    }
-  }
-
-  // Save creds to disk + MongoDB on every update
+  // Save creds on update
   sock.ev.on('creds.update', async () => {
     await saveCreds();
     // Also persist to MongoDB for crash recovery
@@ -135,12 +162,13 @@ async function startSession(sessionId, isInitial = false) {
         const phoneNumber = await question(chalk.yellowBright("[ = ] Enter the WhatsApp number you want to use as a bot (with country code):\n"));
         cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
       } else {
-        log.info(`Using phone number from config: ${chalk.green(cleanNumber)}`);
+        log.info(`Using phone: ${chalk.green(cleanNumber)}`);
       }
+      await delay(1500);
       console.clear();
       const pairCode = await sock.requestPairingCode(cleanNumber);
-      log.info(`Enter this code on your phone to pair: ${chalk.green(pairCode)}`);
-      log.info("⏳ Wait a few seconds and approve the pairing on your phone...");
+      log.info(`Pairing code: ${chalk.green(pairCode)}`);
+      log.info("Enter this code on your phone → Linked Devices → Link a Device");
     } else {
       log.warn(`Session "${sessionId}" has no credentials. Use the session generator to create one.`);
       return null;
@@ -159,8 +187,9 @@ async function startSession(sessionId, isInitial = false) {
     return buffer;
   };
 
-  // Connection handling with auto-reconnect + exponential backoff
-  sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
+  // ---- Connection handling ----
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect } = update;
     try {
       if (connection === 'connecting') {
         log.info(`Session "${sessionId}" connecting...`);
@@ -169,61 +198,49 @@ async function startSession(sessionId, isInitial = false) {
         const reason = lastDisconnect?.error?.message || 'unknown';
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut && statusCode !== 401;
         log.error(`Session "${sessionId}" disconnected (code: ${statusCode}, reason: ${reason}).`);
-        // Remove from active sessions on disconnect
         delete global.activeSessions[sessionId];
         if (shouldReconnect) {
-          // Exponential backoff: 3s, 6s, 12s, 24s, max 30s
           const attempts = (global.reconnectAttempts[sessionId] || 0) + 1;
           global.reconnectAttempts[sessionId] = attempts;
-          const delay = Math.min(3000 * Math.pow(2, attempts - 1), 30000);
-          log.info(`Reconnecting session "${sessionId}" in ${delay / 1000}s (attempt #${attempts})...`);
-          setTimeout(() => startSession(sessionId, false), delay);
+          const backoff = Math.min(3000 * Math.pow(2, attempts - 1), 30000);
+          log.info(`Reconnecting session "${sessionId}" in ${backoff / 1000}s (attempt #${attempts})...`);
+          setTimeout(() => startSession(sessionId, false), backoff);
         } else {
           log.error(`Session "${sessionId}" logged out (401). Not reconnecting.`);
           delete global.reconnectAttempts[sessionId];
         }
       } else if (connection === 'open') {
-        // Reset reconnect counter on successful connection
         global.reconnectAttempts[sessionId] = 0;
         const botNumber = sock.user?.id?.split("@")[0]?.split(":")[0] || 'unknown';
         log.success(`Session "${sessionId}" connected as ${chalk.green(botNumber)}`);
-
-        // Store in global active sessions
         global.activeSessions[sessionId] = sock;
+        if (isInitial) { try { rl.close(); } catch (_) {} }
 
-        // Close readline if still open (initial session)
-        if (isInitial) {
-          try { rl.close(); } catch (_) {}
-        }
+        sock.isPublic = true;
 
-        // Send connection DM
+        // Send connection DM with interactive buttons
         setTimeout(async () => {
           try {
             const ownerJid = (sock.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
-            const message = `
-✅ *Bot Connected Successfully!*
-
-👑 *Creator:* LOYALTY MD
-⚙️ *Version:* 3.0.0
-📦 *Session:* ${sessionId}
-📱 *Number:* ${botNumber}
-
-✨ Type *menu* to see commands!
-`;
-            await sock.sendMessage(ownerJid, { text: message });
+            await sendButtons(sock, ownerJid, {
+              text: `✅ *Bot Connected!*\n\n👑 LOYALTY MD v4.0\n📦 Session: ${sessionId}\n📱 Number: ${botNumber}\n\n✨ Tap a button below!`,
+              footer: '🖥️ Powered by @whiskeysockets/baileys',
+              buttons: [
+                { id: 'menu', text: '📋 Menu' },
+                { id: 'ping', text: '🏓 Ping' }
+              ]
+            });
           } catch (err) {
             log.error(`Failed to send DM for session ${sessionId}: ${err.message || err}`);
           }
         }, 3000);
-
-        sock.isPublic = true;
       }
     } catch (err) {
       console.error(`connection.update error for session ${sessionId}:`, err);
     }
   });
 
-  // Group participant events (anti-promote / anti-demote)
+  // ---- Group participant events (anti-promote / anti-demote) ----
   sock.ev.on('group-participants.update', async (update) => {
     try {
       const { id, participants, action } = update;
@@ -262,85 +279,121 @@ async function startSession(sessionId, isInitial = false) {
     }
   });
 
-  // Auto-view statuses + Message handler (SINGLE listener to prevent spam)
-  sock.ev.on('messages.upsert', async ({ messages, type: upsertType }) => {
+  // ---- Messages handler ----
+  sock.ev.on('messages.upsert', async (chatUpdate) => {
+    const { messages, type: upsertType } = chatUpdate;
+    if (upsertType !== 'notify') return;
     try {
-      const msg = messages[0];
-      if (!msg.message) return;
+      for (const msg of messages) {
+        if (!msg.message) continue;
+        if (msg.key.fromMe) continue;
+        // Skip internal Baileys protocol messages (BAE5)
+        if (msg.key.id?.startsWith('BAE5') && msg.key.id.length === 16) continue;
 
-      // Skip messages from the bot itself (prevent loops)
-      if (msg.key.fromMe) return;
+        // Auto-view statuses
+        if (config.STATUS_VIEW && msg.key.remoteJid === 'status@broadcast') {
+          try { await sock.readMessages([msg.key]); } catch (_) {}
+          continue;
+        }
 
-      // Auto-view statuses
-      if (config.STATUS_VIEW && msg.key && msg.key.remoteJid === 'status@broadcast') {
-        try { await sock.readMessages([msg.key]); } catch (_) {}
-        return;
+        if (msg.key.remoteJid === 'status@broadcast') continue;
+        if (msg.key.remoteJid?.endsWith('@newsletter')) continue;
+
+        const from = msg.key.remoteJid;
+        if (!from.endsWith('@s.whatsapp.net') && !from.endsWith('@g.us')) continue;
+
+        const sender = msg.key.participant || msg.key.remoteJid;
+        const isGroup = from.endsWith('@g.us');
+        const botNumber = (sock.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
+
+        // Unwrap ephemeral / viewOnce / document wrappers
+        let msgContent = msg.message;
+        if (msgContent.ephemeralMessage) msgContent = msgContent.ephemeralMessage.message;
+        if (msgContent.viewOnceMessage) msgContent = msgContent.viewOnceMessage.message;
+        if (msgContent.viewOnceMessageV2) msgContent = msgContent.viewOnceMessageV2.message;
+        if (msgContent.documentWithCaptionMessage) msgContent = msgContent.documentWithCaptionMessage.message;
+        msg.message = msgContent;
+
+        // Extract message body from all possible message types
+        let body =
+          msgContent.conversation ||
+          msgContent.extendedTextMessage?.text ||
+          msgContent.imageMessage?.caption ||
+          msgContent.videoMessage?.caption ||
+          msgContent.documentMessage?.caption ||
+          msgContent.buttonsResponseMessage?.selectedButtonId ||
+          msgContent.listResponseMessage?.singleSelectReply?.selectedRowId ||
+          msgContent.templateButtonReplyMessage?.selectedId ||
+          '';
+
+        // Handle gifted-btns interactive button responses
+        if (msgContent.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson) {
+          try {
+            const params = JSON.parse(msgContent.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson);
+            body = params.id || body;
+          } catch (_) {}
+        }
+
+        body = (body || '').trim();
+        if (!body) continue;
+
+        const contextInfo = msgContent?.extendedTextMessage?.contextInfo
+          || msgContent?.imageMessage?.contextInfo
+          || msgContent?.videoMessage?.contextInfo
+          || msgContent?.documentMessage?.contextInfo
+          || {};
+
+        const msgType = Object.keys(msgContent).find(k => k !== 'messageContextInfo');
+
+        const m = {
+          ...msg,
+          chat: from,
+          sender,
+          isGroup,
+          body,
+          mentionedJid: contextInfo.mentionedJid || [],
+          mtype: msgType,
+          type: msgType,
+          quoted: contextInfo.quotedMessage
+            ? {
+                key: {
+                  remoteJid: contextInfo.remoteJid || from,
+                  id: contextInfo.stanzaId,
+                  participant: contextInfo.participant
+                },
+                message: contextInfo.quotedMessage,
+                sender: contextInfo.participant || from,
+                msg: contextInfo.quotedMessage[Object.keys(contextInfo.quotedMessage).find(k => k !== 'messageContextInfo')]
+              }
+            : null,
+          reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+          pushName: msg.pushName || 'Unknown'
+        };
+
+        const command = body.split(/ +/)[0].toLowerCase();
+
+        // Fast-path: skip full handleCommand for non-bot messages (NO_PREFIX mode)
+        // Antilink/antitag/antibadword still need to run — they're checked inside handleCommand
+        const isKnownCmd = KNOWN_COMMANDS.has(command);
+        const hasAntiFeatures = isGroup && (global.antilink?.[from]?.enabled || global.antitag?.[from]?.enabled || global.antibadword?.[from]?.enabled);
+
+        if (!isKnownCmd && !hasAntiFeatures) continue;
+
+        // Use cached group metadata — no network call
+        const groupMeta = isGroup ? await getCachedGroupMeta(sock, from) : null;
+        const groupAdmins = groupMeta ? groupMeta.participants.filter(p => p.admin).map(p => p.id) : [];
+        const isBotAdmin = isGroup ? groupAdmins.includes(botNumber) : false;
+        const isAdmin = isGroup ? groupAdmins.includes(sender) : false;
+
+        const _cmdStart = Date.now();
+        try {
+          await handleCommand(sock, m, command, isGroup, isAdmin, groupAdmins, isBotAdmin, groupMeta, config);
+          const ms = Date.now() - _cmdStart;
+          if (ms > 50) log.info(`"${command}" ${ms}ms`);
+        } catch (cmdErr) {
+          log.error(`"${command}" failed ${Date.now() - _cmdStart}ms: ${cmdErr.message}`);
+        }
       }
-
-      // Skip status broadcasts for command handling
-      if (msg.key.remoteJid === 'status@broadcast') return;
-
-      const from = msg.key.remoteJid;
-      const sender = msg.key.participant || msg.key.remoteJid;
-      const isGroup = from.endsWith('@g.us');
-      const botNumber = (sock.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
-
-      // Extract message body from all possible message types
-      const msgContent = msg.message;
-      let body =
-        msgContent.conversation ||
-        msgContent.extendedTextMessage?.text ||
-        msgContent.imageMessage?.caption ||
-        msgContent.videoMessage?.caption ||
-        msgContent.documentMessage?.caption ||
-        msgContent.buttonsResponseMessage?.selectedButtonId ||
-        msgContent.listResponseMessage?.singleSelectReply?.selectedRowId ||
-        msgContent.templateButtonReplyMessage?.selectedId ||
-        '';
-      body = (body || '').trim();
-      if (!body) return;
-
-      // Extract contextInfo and mentionedJid from any message type that has them
-      const contextInfo = msgContent?.extendedTextMessage?.contextInfo
-        || msgContent?.imageMessage?.contextInfo
-        || msgContent?.videoMessage?.contextInfo
-        || msgContent?.documentMessage?.contextInfo
-        || {};
-
-      const m = {
-        ...msg,
-        chat: from,
-        sender,
-        isGroup,
-        body,
-        mentionedJid: contextInfo.mentionedJid || [],
-        mtype: Object.keys(msgContent).filter(k => k !== 'messageContextInfo')[0],
-        type: Object.keys(msgContent).filter(k => k !== 'messageContextInfo')[0],
-        quoted: contextInfo.quotedMessage
-          ? {
-              key: {
-                remoteJid: contextInfo.remoteJid || from,
-                id: contextInfo.stanzaId,
-                participant: contextInfo.participant
-              },
-              message: contextInfo.quotedMessage,
-              sender: contextInfo.participant || from,
-              msg: contextInfo.quotedMessage[Object.keys(contextInfo.quotedMessage).filter(k => k !== 'messageContextInfo')[0]]
-            }
-          : null,
-        reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
-        pushName: msg.pushName || 'Unknown'
-      };
-
-      const args = body.split(/ +/);
-      const command = args.shift().toLowerCase();
-
-      const groupMeta = isGroup ? await sock.groupMetadata(from).catch(() => null) : null;
-      const groupAdmins = groupMeta ? groupMeta.participants.filter(p => p.admin).map(p => p.id) : [];
-      const isBotAdmin = isGroup ? groupAdmins.includes(botNumber) : false;
-      const isAdmin = isGroup ? groupAdmins.includes(sender) : false;
-
-      await handleCommand(sock, m, command, isGroup, isAdmin, groupAdmins, isBotAdmin, groupMeta, config);
     } catch (err) {
       console.error('Message handler error:', err);
     }
@@ -486,6 +539,7 @@ http.createServer((req, res) => {
   res.end(JSON.stringify({
     status: 'ok',
     bot: 'LOYALTY MD',
+    engine: '@whiskeysockets/baileys',
     sessions: activeSessions.length,
     uptime: Math.floor(process.uptime()) + 's'
   }));

@@ -1,7 +1,7 @@
 module.exports = {
   BOT_NAME: 'LOYALTY MD',
   OWNER_NAME: 'LOYALTY MD',
-  OWNER_NUMBER: '255778104517',
+  OWNER_NUMBER: '2349112184365',
 
   // ============================================================
   // 📱 PHONE_NUMBER — The WhatsApp number to connect as the bot
