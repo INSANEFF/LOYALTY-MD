@@ -236,7 +236,7 @@ async function startSession(sessionId, isInitial = false) {
           try {
             const ownerJid = (sock.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
             await sendButtons(sock, ownerJid, {
-              text: `✅ *Bot Connected!*\n\n👑 LOYALTY MD v4.0\n📦 Session: ${sessionId}\n📱 Number: ${botNumber}\n\n✨ Tap a button below!`,
+              text: `✅ *${config.BOT_NAME} Connected!*\n\n👑 ${config.OWNER_NAME} v4.0\n📦 Session: ${sessionId}\n📱 Number: ${botNumber}\n\n✨ Tap a button below!`,
               footer: '🖥️ Powered by @whiskeysockets/baileys',
               buttons: [
                 { id: 'menu', text: '📋 Menu' },
@@ -396,7 +396,10 @@ async function startSession(sessionId, isInitial = false) {
           pushName: msg.pushName || 'Unknown'
         };
 
-        const command = body.split(/ +/)[0].toLowerCase();
+        let command = body.split(/ +/)[0].toLowerCase();
+        // Strip common prefixes (. ! / #) so ".ping" matches "ping"
+        const stripped = command.replace(/^[.!/#+]+/, '');
+        if (stripped) command = stripped;
 
         // Fast-path: skip full handleCommand for non-bot messages (NO_PREFIX mode)
         // Antilink/antitag/antibadword still need to run — they're checked inside handleCommand
@@ -412,6 +415,7 @@ async function startSession(sessionId, isInitial = false) {
         const isAdmin = isGroup ? groupAdmins.includes(sender) : false;
 
         const _cmdStart = Date.now();
+        m._receivedAt = _cmdStart;
         try {
           await handleCommand(sock, m, command, isGroup, isAdmin, groupAdmins, isBotAdmin, groupMeta, config);
           const ms = Date.now() - _cmdStart;

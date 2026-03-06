@@ -214,18 +214,18 @@ if (!trashcore.isPublic && !isOwner && !isSudo) {
             // ================= PING =================
             case 'ping':
             case 'alive': {
-                const start = Date.now();
-                await reply(`🏓 Pong!\nSpeed: ${Date.now() - start}ms\nUptime: ${formatUptime(process.uptime())}\nOwner: LOYALTY MD`);
+                const speed = Date.now() - (m._receivedAt || Date.now());
+                reply(`🏓 Pong!\nSpeed: ${speed}ms\nUptime: ${formatUptime(process.uptime())}\nOwner: ${config.OWNER_NAME}`);
                 break;
             }
 
             // ================= MENU =================
             case 'menu':
             case 'help': {
-                const menuText = `👑 Creator: LOYALTY MD
-📝 Type: Base Script
+                const menuText = `👑 Creator: ${config.OWNER_NAME}
+📝 Bot: ${config.BOT_NAME}
 ⚡ Version: 4.0.0
-📦 Engine: gifted-baileys
+📦 Engine: @whiskeysockets/baileys
 
 |COMMANDS|
 
@@ -289,7 +289,7 @@ if (!trashcore.isPublic && !isOwner && !isSudo) {
                 try {
                     await sendButtons(trashcore, from, {
                         text: stylishReply(menuText),
-                        footer: '🖥️ Powered by gifted-baileys',
+                        footer: `🖥️ Powered by ${config.BOT_NAME}`,
                         buttons: [
                             { id: 'ping', text: '🏓 Ping' },
                             { id: 'weather', text: '🌤️ Weather' },
