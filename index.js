@@ -293,7 +293,6 @@ async function startSession(sessionId, isInitial = false) {
   });
 
   // ---- Messages handler ----
-  const sessionStartSec = Math.floor(Date.now() / 1000);
   sock.ev.on('messages.upsert', async (chatUpdate) => {
     const { messages, type: upsertType } = chatUpdate;
     // baileys v7 sends 'append' for real-time messages; v6 used 'notify'
@@ -304,12 +303,31 @@ async function startSession(sessionId, isInitial = false) {
       for (const msg of [...recentBatch].reverse()) {
         if (!msg.message) continue;
 
-        // In v7, 'append' may include offline backlog on reconnect.
-        // Drop items older than this runtime start to keep command latency low.
+        // In v7, 'append' often contains backlog. For append, only process likely commands.
         if (upsertType === 'append') {
-          const tsRaw = msg.messageTimestamp;
-          const tsSeconds = tsRaw ? (typeof tsRaw === 'object' ? Number(tsRaw.low || tsRaw) : Number(tsRaw)) : 0;
-          if (tsSeconds > 0 && tsSeconds < (sessionStartSec - 15) && !msg.key.fromMe) continue;
+          const raw = msg.message || {};
+          const rawInner = raw.ephemeralMessage?.message || raw.viewOnceMessage?.message || raw.viewOnceMessageV2?.message || raw;
+          const quickText = (
+            rawInner.conversation ||
+            rawInner.extendedTextMessage?.text ||
+            rawInner.imageMessage?.caption ||
+            rawInner.videoMessage?.caption ||
+            rawInner.documentMessage?.caption ||
+            rawInner.buttonsResponseMessage?.selectedButtonId ||
+            rawInner.listResponseMessage?.singleSelectReply?.selectedRowId ||
+            rawInner.templateButtonReplyMessage?.selectedId ||
+            ''
+          ).trim();
+
+          const isLikelyCommand = /^[.!/#+><=]/.test(quickText);
+          const isInteractiveCmd = !!(
+            rawInner.buttonsResponseMessage?.selectedButtonId ||
+            rawInner.listResponseMessage?.singleSelectReply?.selectedRowId ||
+            rawInner.templateButtonReplyMessage?.selectedId ||
+            rawInner.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson
+          );
+
+          if (!isLikelyCommand && !isInteractiveCmd && !msg.key.fromMe) continue;
         }
 
         // Allow fromMe if it starts with a command prefix — owner can use bot from same phone
