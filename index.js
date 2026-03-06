@@ -303,32 +303,7 @@ async function startSession(sessionId, isInitial = false) {
       for (const msg of [...recentBatch].reverse()) {
         if (!msg.message) continue;
 
-        // In v7, 'append' often contains backlog. For append, only process likely commands.
-        if (upsertType === 'append') {
-          const raw = msg.message || {};
-          const rawInner = raw.ephemeralMessage?.message || raw.viewOnceMessage?.message || raw.viewOnceMessageV2?.message || raw;
-          const quickText = (
-            rawInner.conversation ||
-            rawInner.extendedTextMessage?.text ||
-            rawInner.imageMessage?.caption ||
-            rawInner.videoMessage?.caption ||
-            rawInner.documentMessage?.caption ||
-            rawInner.buttonsResponseMessage?.selectedButtonId ||
-            rawInner.listResponseMessage?.singleSelectReply?.selectedRowId ||
-            rawInner.templateButtonReplyMessage?.selectedId ||
-            ''
-          ).trim();
-
-          const isLikelyCommand = /^[.!/#+><=]/.test(quickText);
-          const isInteractiveCmd = !!(
-            rawInner.buttonsResponseMessage?.selectedButtonId ||
-            rawInner.listResponseMessage?.singleSelectReply?.selectedRowId ||
-            rawInner.templateButtonReplyMessage?.selectedId ||
-            rawInner.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson
-          );
-
-          if (!isLikelyCommand && !isInteractiveCmd && !msg.key.fromMe) continue;
-        }
+        // Process append + notify the same way so commands are never dropped.
 
         // Allow fromMe if it starts with a command prefix — owner can use bot from same phone
         // Bot responses never start with . ! / # + so no infinite loop risk
@@ -425,12 +400,8 @@ async function startSession(sessionId, isInitial = false) {
         const stripped = command.replace(/^[.!/#+]+/, '');
         if (stripped) command = stripped;
 
-        // Fast-path: skip full handleCommand for non-bot messages (NO_PREFIX mode)
-        // Antilink/antitag/antibadword still need to run — they're checked inside handleCommand
-        const isKnownCmd = KNOWN_COMMANDS.has(command);
-        const hasAntiFeatures = isGroup && (global.antilink?.[from]?.enabled || global.antitag?.[from]?.enabled || global.antibadword?.[from]?.enabled);
-
-        if (!isKnownCmd && !hasAntiFeatures) continue;
+        // Always forward text to handleCommand for reliability.
+        // Non-command chatter exits quickly in case.js switch/default.
 
         // Use cached group metadata — no network call
         const groupMeta = isGroup ? await getCachedGroupMeta(sock, from) : null;
