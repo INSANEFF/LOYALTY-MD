@@ -47,12 +47,25 @@ process.on('unhandledRejection', (err) => {
   if (!ignore.some(x => msg.includes(x))) console.error('[UNHANDLED]', msg);
 });
 
-// Suppress libsignal Bad MAC / decrypt error spam from flooding console
+// Suppress noisy baileys/signal internal logs
 const _origConsoleError = console.error;
 console.error = function (...args) {
   const first = String(args[0] || '');
   if (first.includes('Bad MAC') || first.includes('Failed to decrypt') || first.includes('Session error') || first.includes('decryption-error')) return;
   _origConsoleError.apply(console, args);
+};
+// libsignal dumps huge SessionEntry objects via console.info — suppress them
+const _origConsoleInfo = console.info;
+console.info = function (...args) {
+  const first = String(args[0] || '');
+  if (first.includes('Closing session') || first.includes('Opening session') || first.includes('Removing old closed') || first.includes('Migrating session')) return;
+  _origConsoleInfo.apply(console, args);
+};
+const _origConsoleWarn = console.warn;
+console.warn = function (...args) {
+  const first = String(args[0] || '');
+  if (first.includes('Decrypted message with')) return;
+  _origConsoleWarn.apply(console, args);
 };
 
 // Group metadata cache (5 min TTL) to avoid network calls on every message
@@ -282,7 +295,8 @@ async function startSession(sessionId, isInitial = false) {
   // ---- Messages handler ----
   sock.ev.on('messages.upsert', async (chatUpdate) => {
     const { messages, type: upsertType } = chatUpdate;
-    if (upsertType !== 'notify') return;
+    // baileys v7 sends 'append' for real-time messages; v6 used 'notify'
+    if (upsertType !== 'notify' && upsertType !== 'append') return;
     try {
       for (const msg of messages) {
         if (!msg.message) continue;
@@ -300,11 +314,15 @@ async function startSession(sessionId, isInitial = false) {
         if (msg.key.remoteJid?.endsWith('@newsletter')) continue;
 
         const from = msg.key.remoteJid;
-        if (!from.endsWith('@s.whatsapp.net') && !from.endsWith('@g.us')) continue;
+        if (!from.endsWith('@s.whatsapp.net') && !from.endsWith('@g.us') && !from.endsWith('@lid')) continue;
 
-        const sender = msg.key.participant || msg.key.remoteJid;
+        // baileys v7 uses LID addressing; participantAlt has the real phone JID
+        const sender = msg.key.participantAlt || msg.key.participant || msg.key.remoteJid;
         const isGroup = from.endsWith('@g.us');
         const botNumber = (sock.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
+
+
+
 
         // Unwrap ephemeral / viewOnce / document wrappers
         let msgContent = msg.message;

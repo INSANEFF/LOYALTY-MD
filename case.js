@@ -74,14 +74,15 @@ module.exports = async function handleCommand(trashcore, m, command, isGroup, is
         };
     }
     const from = trashcore.decodeJid(m.key.remoteJid);
-    const sender = m.key.participant || m.key.remoteJid;
-    const participant = trashcore.decodeJid(m.key.participant || from);
+    // baileys v7 uses LID addressing; participantAlt has the real phone JID
+    const sender = m.key.participantAlt || m.key.participant || m.key.remoteJid;
+    const participant = trashcore.decodeJid(m.key.participantAlt || m.key.participant || from);
     const pushname = m.pushName || "Unknown User";
     const chatType = from.endsWith('@g.us') ? 'Group' : 'Private';
     const chatName = chatType === 'Group' ? (groupMeta?.subject || 'Unknown Group') : pushname;
 // Safe owner check — supports multiple owners + sudo users
 const botNumber = (trashcore.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
-const senderJid = m.key.participant || m.key.remoteJid;
+const senderJid = m.key.participantAlt || m.key.participant || m.key.remoteJid;
 const senderNumber = senderJid.split('@')[0].split(':')[0];
 const ownersList = [config.OWNER_NUMBER, ...getOwners()].filter(Boolean);
 const isOwner = senderJid === botNumber || ownersList.includes(senderNumber);
