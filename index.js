@@ -304,12 +304,14 @@ async function startSession(sessionId, isInitial = false) {
         // Skip internal Baileys protocol messages (BAE5)
         if (msg.key.id?.startsWith('BAE5') && msg.key.id.length === 16) continue;
 
-        // Skip stale messages (older than 60s) — prevents processing offline backlog on reconnect
+        // Skip stale messages (older than 90s) — prevents processing offline backlog on reconnect
         const msgTs = msg.messageTimestamp;
-        if (msgTs && (typeof msgTs === 'number' || typeof msgTs === 'object') ) {
-          const tsSeconds = typeof msgTs === 'object' ? Number(msgTs.low || msgTs) : msgTs;
-          const ageMs = Date.now() - tsSeconds * 1000;
-          if (ageMs > 60000) continue;
+        if (msgTs) {
+          const tsSeconds = typeof msgTs === 'object' ? Number(msgTs.low || msgTs) : Number(msgTs);
+          if (tsSeconds > 0) {
+            const ageMs = Date.now() - tsSeconds * 1000;
+            if (ageMs > 90000) continue;
+          }
         }
 
         // Auto-view statuses
