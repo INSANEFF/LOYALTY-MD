@@ -300,19 +300,14 @@ async function startSession(sessionId, isInitial = false) {
     try {
       for (const msg of messages) {
         if (!msg.message) continue;
-        if (msg.key.fromMe) continue;
+        // Allow fromMe if it starts with a command prefix — owner can use bot from same phone
+        // Bot responses never start with . ! / # + so no infinite loop risk
+        if (msg.key.fromMe) {
+          const _bodyPeek = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
+          if (!/^[.!/#+><=]/.test(_bodyPeek)) continue;
+        }
         // Skip internal Baileys protocol messages (BAE5)
         if (msg.key.id?.startsWith('BAE5') && msg.key.id.length === 16) continue;
-
-        // Skip stale messages (older than 90s) — prevents processing offline backlog on reconnect
-        const msgTs = msg.messageTimestamp;
-        if (msgTs) {
-          const tsSeconds = typeof msgTs === 'object' ? Number(msgTs.low || msgTs) : Number(msgTs);
-          if (tsSeconds > 0) {
-            const ageMs = Date.now() - tsSeconds * 1000;
-            if (ageMs > 90000) continue;
-          }
-        }
 
         // Auto-view statuses
         if (config.STATUS_VIEW && msg.key.remoteJid === 'status@broadcast') {
@@ -330,9 +325,6 @@ async function startSession(sessionId, isInitial = false) {
         const sender = msg.key.participantAlt || msg.key.participant || msg.key.remoteJid;
         const isGroup = from.endsWith('@g.us');
         const botNumber = (sock.user?.id?.split(":")[0] || '') + "@s.whatsapp.net";
-
-
-
 
         // Unwrap ephemeral / viewOnce / document wrappers
         let msgContent = msg.message;
