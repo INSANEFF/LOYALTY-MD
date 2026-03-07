@@ -16,6 +16,7 @@ module.exports = {
   PREFIX: process.env.PREFIX || '',
   NO_PREFIX: (process.env.NO_PREFIX || 'false').toLowerCase() === 'true',
   STATUS_VIEW: (process.env.STATUS_VIEW || 'true').toLowerCase() === 'true',
+  MAX_MSG_AGE_SEC: Number(process.env.MAX_MSG_AGE_SEC || '90'),
 
   // 🗄️ DATABASE & SESSION
   SESSION_DIR: './trash_baileys',

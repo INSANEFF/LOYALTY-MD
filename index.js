@@ -80,6 +80,46 @@ function getCachedGroupMeta(sock, jid) {
   }).catch(() => null);
 }
 
+function getMessageTimestampMs(msg) {
+  const ts = msg?.messageTimestamp;
+  if (!ts) return Date.now();
+
+  if (typeof ts === 'number') return ts < 1e12 ? ts * 1000 : ts;
+  if (typeof ts === 'string') {
+    const n = Number(ts);
+    if (Number.isFinite(n)) return n < 1e12 ? n * 1000 : n;
+  }
+  if (typeof ts === 'object') {
+    if (typeof ts.toNumber === 'function') {
+      const n = ts.toNumber();
+      if (Number.isFinite(n)) return n < 1e12 ? n * 1000 : n;
+    }
+    if (typeof ts.low === 'number') {
+      return ts.low < 1e12 ? ts.low * 1000 : ts.low;
+    }
+  }
+  return Date.now();
+}
+
+// Deduplicate repeated upsert deliveries (append/notify can overlap briefly)
+const _seenMsgIds = new Map();
+function isDuplicateUpsertMessage(msg) {
+  const jid = msg?.key?.remoteJid;
+  const id = msg?.key?.id;
+  if (!jid || !id) return false;
+
+  const now = Date.now();
+  const ttlMs = 2 * 60 * 1000;
+  for (const [k, ts] of _seenMsgIds) {
+    if (now - ts > ttlMs) _seenMsgIds.delete(k);
+  }
+
+  const key = `${jid}:${id}`;
+  if (_seenMsgIds.has(key)) return true;
+  _seenMsgIds.set(key, now);
+  return false;
+}
+
 // Known bot commands — skip handleCommand for non-matching messages (NO_PREFIX mode)
 const KNOWN_COMMANDS = new Set([
   'ping','alive','menu','help','weather','checktime','time','gitclone','save',
@@ -295,22 +335,19 @@ async function startSession(sessionId, isInitial = false) {
   // ---- Messages handler ----
   sock.ev.on('messages.upsert', async (chatUpdate) => {
     const { messages, type: upsertType } = chatUpdate;
-    // baileys v7 sends 'append' for real-time messages; v6 used 'notify'
+    // Keep intake compatible with both v6/v7 style upserts.
     if (upsertType !== 'notify' && upsertType !== 'append') return;
+    if (!messages?.length) return;
     try {
-      // Keep processing responsive under heavy backlog bursts.
-      const recentBatch = messages.length > 40 ? messages.slice(-40) : messages;
-      for (const msg of [...recentBatch].reverse()) {
-        if (!msg.message) continue;
+      for (const msg of messages) {
+        if (!msg?.message) continue;
+        if (isDuplicateUpsertMessage(msg)) continue;
 
-        // Process append + notify the same way so commands are never dropped.
+        const msgAgeMs = Date.now() - getMessageTimestampMs(msg);
+        const maxMsgAgeMs = Math.max(10, Number(config.MAX_MSG_AGE_SEC || 90)) * 1000;
+        // Drop old backlog only for non-owner incoming append traffic.
+        if (!msg.key.fromMe && upsertType === 'append' && msgAgeMs > maxMsgAgeMs) continue;
 
-        // Allow fromMe if it starts with a command prefix — owner can use bot from same phone
-        // Bot responses never start with . ! / # + so no infinite loop risk
-        if (msg.key.fromMe) {
-          const _bodyPeek = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || '').trim();
-          if (!/^[.!/#+><=]/.test(_bodyPeek)) continue;
-        }
         // Auto-view statuses
         if (config.STATUS_VIEW && msg.key.remoteJid === 'status@broadcast') {
           try { await sock.readMessages([msg.key]); } catch (_) {}
@@ -395,7 +432,6 @@ async function startSession(sessionId, isInitial = false) {
         const rawToken = body.split(/ +/)[0].toLowerCase();
         const hasPrefix = /^[.!/#+><=]/.test(rawToken);
         let command = rawToken.replace(/^[.!/#+><=]+/, '');
-        if (!command) continue;
 
         const interactiveTriggered = !!(
           msgContent.buttonsResponseMessage?.selectedButtonId ||
@@ -404,13 +440,23 @@ async function startSession(sessionId, isInitial = false) {
           msgContent.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson
         );
 
+        // Allow fromMe only for commands/interactions after full unwrap/body extraction.
+        // This avoids dropping disappearing/ephemeral current-chat commands.
+        if (msg.key.fromMe && !hasPrefix && !interactiveTriggered) continue;
+
         const isKnownCmd = KNOWN_COMMANDS.has(command);
         const hasAntiFeatures = isGroup && (global.antilink?.[from]?.enabled || global.antitag?.[from]?.enabled || global.antibadword?.[from]?.enabled);
         const allowNoPrefixDm = config.NO_PREFIX && !isGroup && isKnownCmd;
 
-        // Process only real commands to avoid CPU spikes from normal group chat.
-        if (!hasPrefix && !interactiveTriggered && !allowNoPrefixDm && !hasAntiFeatures) continue;
-        if (!isKnownCmd && !hasAntiFeatures) continue;
+        // Hitori-style principle: dispatch command-like events, avoid over-filtering.
+        const shouldDispatch = hasAntiFeatures || interactiveTriggered || hasPrefix || allowNoPrefixDm;
+        if (!shouldDispatch) continue;
+
+        if (!command && !hasAntiFeatures) continue;
+        if (hasPrefix || interactiveTriggered || allowNoPrefixDm) {
+          const who = msg.key.fromMe ? 'fromMe' : 'incoming';
+          log.info(`cmd-candidate ${who} ${upsertType} age=${Math.floor(msgAgeMs / 1000)}s token=${rawToken}`);
+        }
 
         // Use cached group metadata — no network call
         const groupMeta = isGroup ? await getCachedGroupMeta(sock, from) : null;
