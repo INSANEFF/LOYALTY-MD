@@ -430,8 +430,21 @@ async function startSession(sessionId, isInitial = false) {
         };
 
         const rawToken = body.split(/ +/)[0].toLowerCase();
-        const hasPrefix = /^[.!/#+><=]/.test(rawToken);
-        let command = rawToken.replace(/^[.!/#+><=]+/, '');
+        const cfgPrefix = config.PREFIX || '';
+        // If a specific prefix is configured, require it; otherwise accept conventional chars
+        const hasPrefix = cfgPrefix
+          ? rawToken.startsWith(cfgPrefix)
+          : /^[.!/#+><=]/.test(rawToken);
+        // Strip prefix chars to get the bare command name
+        let command = cfgPrefix
+          ? rawToken.slice(cfgPrefix.length)
+          : rawToken.replace(/^[.!/#+><=]+/, '');
+
+        const isKnownCmd = KNOWN_COMMANDS.has(command);
+        const hasAntiFeatures = isGroup && (global.antilink?.[from]?.enabled || global.antitag?.[from]?.enabled || global.antibadword?.[from]?.enabled);
+        // Empty PREFIX means no-prefix mode — dispatch all known commands without a prefix char
+        const noPrefixMode = config.NO_PREFIX || !cfgPrefix;
+        const allowNoPrefix = noPrefixMode && isKnownCmd;
 
         const interactiveTriggered = !!(
           msgContent.buttonsResponseMessage?.selectedButtonId ||
@@ -440,20 +453,14 @@ async function startSession(sessionId, isInitial = false) {
           msgContent.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson
         );
 
-        // Allow fromMe only for commands/interactions after full unwrap/body extraction.
-        // This avoids dropping disappearing/ephemeral current-chat commands.
-        if (msg.key.fromMe && !hasPrefix && !interactiveTriggered) continue;
+        // Allow fromMe commands/interactions (includes no-prefix known cmds)
+        if (msg.key.fromMe && !hasPrefix && !interactiveTriggered && !allowNoPrefix) continue;
 
-        const isKnownCmd = KNOWN_COMMANDS.has(command);
-        const hasAntiFeatures = isGroup && (global.antilink?.[from]?.enabled || global.antitag?.[from]?.enabled || global.antibadword?.[from]?.enabled);
-        const allowNoPrefixDm = config.NO_PREFIX && !isGroup && isKnownCmd;
-
-        // Hitori-style principle: dispatch command-like events, avoid over-filtering.
-        const shouldDispatch = hasAntiFeatures || interactiveTriggered || hasPrefix || allowNoPrefixDm;
+        const shouldDispatch = hasAntiFeatures || interactiveTriggered || hasPrefix || allowNoPrefix;
         if (!shouldDispatch) continue;
 
         if (!command && !hasAntiFeatures) continue;
-        if (hasPrefix || interactiveTriggered || allowNoPrefixDm) {
+        if (hasPrefix || interactiveTriggered || allowNoPrefix) {
           const who = msg.key.fromMe ? 'fromMe' : 'incoming';
           log.info(`cmd-candidate ${who} ${upsertType} age=${Math.floor(msgAgeMs / 1000)}s token=${rawToken}`);
         }
